@@ -106,6 +106,7 @@ def visualize_dff_fr():
     # plt.savefig('dff-firing-rate.svg', transparent=True, dpi=500)
     plt.show()
 
+
 def visualize_dff():
     data = np.load('./data/spike_rates/ito_2017-10-26_1_spike_rate.npz')
     dff = data['dff'][1:]

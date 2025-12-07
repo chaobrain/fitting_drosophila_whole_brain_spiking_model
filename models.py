@@ -18,10 +18,9 @@
 import datetime
 import functools
 import os
-import subprocess
 import time
 from pathlib import Path
-from typing import NamedTuple, Callable
+from typing import Callable
 
 import brainevent
 import brainscale
@@ -34,9 +33,13 @@ import matplotlib.pyplot as plt
 import numba
 import numpy as np
 import pandas as pd
-from scipy import optimize, signal
+from scipy import signal, optimize
+
+from setting import Setting
 
 dftype = brainstate.environ.dftype()
+
+data_path = './data'
 
 
 def v_init(shape):
@@ -58,7 +61,8 @@ def v_init(shape):
         An array of initialized membrane voltages with the specified shape, drawn from
         a normal distribution and scaled to millivolts.
     """
-    return brainstate.random.RandomState(42).normal(0., 0.8, shape) * u.mV
+    # return brainstate.random.RandomState(42).normal(0., 0.8, shape) * u.mV
+    return jnp.zeros(shape) * u.mV
 
 
 def g_init(shape):
@@ -80,40 +84,40 @@ def g_init(shape):
         An array of initialized synaptic conductances with the specified shape, drawn from
         a uniform distribution and scaled to millivolts.
     """
-    return brainstate.random.RandomState(2025).uniform(0., 0.2, shape) * u.mV
+    # return brainstate.random.RandomState(2025).uniform(0., 0.2, shape) * u.mV
+    return jnp.zeros(shape) * u.mV
 
 
-def get_gpu_info() -> str:
+def output(file, msg: str):
     """
-    Retrieve the name of the first available NVIDIA GPU.
+    Write a message to both the console and a file.
 
-    This function attempts to get GPU information by executing the nvidia-smi command
-    and parsing its output. It extracts the GPU name from the command output and
-    formats it by joining the name components with hyphens.
+    This function outputs the given message to the standard output (console) and
+    writes it to the specified file, appending a newline character. The file is
+    flushed immediately after writing to ensure data is committed to disk.
+
+    Parameters
+    ----------
+    file : file-like object
+        An open file-like object with write and flush methods. Typically this is
+        a file opened in write or append mode.
+    msg : str
+        The message string to be output to console and written to the file.
 
     Returns
     -------
-    str
-        The name of the first available NVIDIA GPU formatted with hyphens between words.
-        Returns 'Unknown' if no GPU is found or if an error occurs during the query.
+    None
+        This function does not return any value.
 
     Examples
     --------
-    >>> get_gpu_info()
-    'GeForce-RTX-3080'
-
-    Notes
-    -----
-    This function requires the nvidia-smi tool to be installed and accessible in the
-    system path. It will fail gracefully by returning 'Unknown' if the command
-    cannot be executed or returns an error.
+    >>> with open('log.txt', 'w') as f:
+    ...     output(f, 'Processing started')
+    Processing started
     """
-    try:
-        output = subprocess.check_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], text=True)
-        gpu_names = output.strip().split('\n')
-        return '-'.join(str(gpu_names[0]).split(' ')[2:])
-    except Exception as e:
-        return 'Unknown'
+    print(msg)
+    file.write(msg + '\n')
+    file.flush()
 
 
 def df_f_to_firing_rate(
@@ -479,79 +483,33 @@ def trim_region_response(
     return region_response_trimmed
 
 
-def barplot(neuropil_names, neuropil_fr, title='', xticks=True):
-    """
-    Create a bar plot of firing rates for different neuropils in the Drosophila brain.
-
-    This function generates a matplotlib bar plot to visualize firing rates across
-    different brain regions (neuropils), with customizable display options for
-    axis labels and titles.
-
-    Parameters
-    ----------
-    neuropil_names : array-like
-        Names of the neuropil regions to be displayed on the x-axis.
-    neuropil_fr : array-like
-        Firing rates (in Hz) corresponding to each neuropil region.
-    title : str, optional
-        Title for the plot. If empty, no title is displayed. Default is ''.
-    xticks : bool, optional
-        Whether to display x-axis tick labels (neuropil names). When True,
-        names are displayed rotated 90 degrees for readability. Default is True.
-
-    Returns
-    -------
-    None
-        The function creates a plot but does not return any values.
-
-    Notes
-    -----
-    This function uses matplotlib for visualization and assumes that a figure
-    has already been created or will be displayed/saved after calling this function.
-    """
-    x_pos = np.arange(len(neuropil_names))
-    plt.bar(x_pos, neuropil_fr)
-    if xticks:
-        plt.xticks(x_pos, neuropil_names, rotation=90, fontsize=8)
-        plt.xlabel('Neuropil')
-    plt.ylabel('Firing Rate (Hz)')
-    if title:
-        plt.title(title)
+def load_setting(filepath: str | Path) -> Setting:
+    with open(os.path.join(filepath, 'training-losses.txt'), 'r') as f:
+        lines = eval(f.readline())
+    return Setting(lines)
 
 
-def output(file, msg: str):
-    """
-    Write a message to both the console and a file.
-
-    This function outputs the given message to the standard output (console) and
-    writes it to the specified file, appending a newline character. The file is
-    flushed immediately after writing to ensure data is committed to disk.
-
-    Parameters
-    ----------
-    file : file-like object
-        An open file-like object with write and flush methods. Typically this is
-        a file opened in write or append mode.
-    msg : str
-        The message string to be output to console and written to the file.
-
-    Returns
-    -------
-    None
-        This function does not return any value.
-
-    Examples
-    --------
-    >>> with open('log.txt', 'w') as f:
-    ...     output(f, 'Processing started')
-    Processing started
-    """
-    print(msg)
-    file.write(msg + '\n')
-    file.flush()
+def show_difference(old_setting: Setting, new_setting: Setting) -> dict:
+    difference = dict()
+    old_setting = old_setting.to_dict()
+    new_setting = new_setting.to_dict()
+    for key in old_setting:
+        if key not in new_setting:
+            difference[key] = None
+        elif old_setting[key] != new_setting[key]:
+            difference[key] = new_setting[key]
+    return difference
 
 
-def load_syn(flywire_version: str | int) -> brainevent.CSR:
+def new_filepath(checkpoint_path, settings):
+    filepath = os.path.dirname(checkpoint_path)
+    diff = show_difference(load_setting(filepath), settings)
+    if len(diff) > 0:
+        filepath = os.path.join(filepath, '-'.join([f'{k}={v}' for k, v in diff.items()]))
+    return filepath
+
+
+def load_syn(flywire_version: str | int, scale_factor: float) -> brainevent.CSR:
     """
     Load synaptic connectivity data from the FlyWire connectome dataset.
 
@@ -564,6 +522,9 @@ def load_syn(flywire_version: str | int) -> brainevent.CSR:
     flywire_version : str or int
         Version identifier for the FlyWire connectome dataset.
         Accepted values are '630', 630, '783', or 783.
+    scale_factor: float
+        The scaling factor to apply to the synaptic weights, typically used to adjust
+        the overall strength of the connections.
 
     Returns
     -------
@@ -585,11 +546,11 @@ def load_syn(flywire_version: str | int) -> brainevent.CSR:
     4. Converting the data to CSR format
     """
     if flywire_version in ['783', 783]:
-        path_neu = 'data/Completeness_783.csv'
-        path_syn = 'data/Connectivity_783.parquet'
+        path_neu = os.path.join(data_path, 'Completeness_783.csv')
+        path_syn = os.path.join(data_path, 'Connectivity_783.parquet')
     elif flywire_version in ['630', 630]:
-        path_neu = 'data/Completeness_630_final.csv'
-        path_syn = 'data/Connectivity_630_final.parquet'
+        path_neu = os.path.join(data_path, 'Completeness_630_final.csv')
+        path_syn = os.path.join(data_path, 'Connectivity_630_final.parquet')
     else:
         raise ValueError('flywire_version must be either "783" or "630"')
 
@@ -613,7 +574,7 @@ def load_syn(flywire_version: str | int) -> brainevent.CSR:
     indptr = np.cumsum(indptr)
     indices = i_post
 
-    weight = jnp.asarray(weight, dtype=dftype)
+    weight = jnp.asarray(weight, dtype=dftype) * scale_factor
     csr = brainevent.CSR((weight, indices, indptr), shape=(n_neuron, n_neuron))
     return csr
 
@@ -715,271 +676,6 @@ def count_pre_post_connections(
     return np.asarray(pre_indices), np.asarray(pre_counts), np.asarray(post_indices), np.asarray(post_counts)
 
 
-def read_setting(filepath) -> dict:
-    """
-    Read and parse model configuration settings from the first-round training results file.
-
-    This function opens a text file containing serialized configuration settings from
-    the first round of training, converts the stored Namespace object to a dictionary,
-    and returns the parsed settings.
-
-    Parameters
-    ----------
-    filepath : str
-        Path to the directory containing the 'first-round-losses.txt' file
-        which stores the serialized configuration settings.
-
-    Returns
-    -------
-    dict
-        A dictionary containing the model configuration settings parsed from the file.
-
-    Notes
-    -----
-    The function expects the first line of the file to contain a serialized Namespace
-    object. It replaces 'Namespace' with 'dict' to allow safe evaluation of the string
-    as a Python dictionary.
-    """
-    with open(os.path.join(filepath, 'first-round-losses.txt'), 'r') as f:
-        setting = eval(f.readline().replace('Namespace', 'dict'))
-    return setting
-
-
-class ActivityTokenization:
-    """
-    A class for storing parameters and methods for tokenizing neural activity data.
-
-    This class encapsulates the parameters required for discretizing continuous
-    neural firing rates into bins, which is useful for training models that
-    operate on discrete inputs.
-
-    Parameters
-    ----------
-    max_fr : u.Quantity[u.Hz], optional
-        The maximum firing rate considered for binning, specified in Hertz. Default is 100 Hz.
-    n_bin : int, optional
-        The number of bins to discretize the firing rates into. Default is 100.
-    space : str, optional
-        The spacing method for bin edges. Options are 'linear', 'log', 'log10', or 'sqrt'.
-        Default is 'linear'.
-    """
-
-    def __init__(
-        self,
-        max_fr: u.Quantity[u.Hz] = 100. * u.Hz,
-        n_bin: int = 100,
-        space: str = 'linear'
-    ):
-        self.space = space
-        if space == 'linear':
-            bins = u.math.linspace(0 * u.Hz, max_fr, n_bin)
-            self.lowers = bins[:-1]
-            self.uppers = bins[1:]
-        elif space == 'log':
-            bins = jnp.linspace(jnp.log(1e-2), jnp.log(max_fr.to_decimal(u.Hz)), n_bin)
-            bins = jnp.exp(bins) * u.Hz
-        elif space == 'log10':
-            bins = jnp.linspace(jnp.log10(1e-2), jnp.log10(max_fr.to_decimal(u.Hz)), n_bin)
-            bins = jnp.exp(bins) * u.Hz
-        elif space == 'sqrt':
-            bins = (u.math.arange(0, n_bin) ** 2) / (n_bin - 1) ** 2 * max_fr
-        else:
-            raise ValueError(f'Unknown method {space}, must be one of ["linear", "log", "log10", "sqrt"]')
-        self.max_fr = max_fr
-        self.bins = bins
-
-    @brainstate.transform.jit(static_argnums=0)
-    def to_bin_indices(self, neuropil_fr: u.Quantity[u.Hz]):
-        """
-        Convert neuropil firing rates to bin indices.
-
-        This method maps the given neuropil firing rates to the corresponding bin indices
-        based on the pre-defined bins stored in the class instance.
-
-        Examples
-        --------
-
-        >>> tokenization = ActivityTokenization(max_fr=50 * u.Hz, n_bin=10)
-        >>> neuropil_fr = jnp.array([0, 3, 7, 12, 25, 49]) * u.Hz
-        >>> bin_indices = tokenization.to_bin_indices(neuropil_fr)
-        >>> print(bin_indices)
-        Array([ 1,  1,  2,  3,  6, 10], dtype=int32)
-
-        Args:
-            neuropil_fr (u.Quantity[u.Hz]): Firing rates for each neuropil, specified in Hertz units.
-
-        Returns:
-            jnp.ndarray: An array of bin indices corresponding to each input firing rate.
-        """
-        assert self.bins.ndim == 1, 'bins must be a 1D array'
-        bins = self.bins.to_decimal(u.Hz) if isinstance(self.bins, u.Quantity) else self.bins
-        neuropil_fr = neuropil_fr.to_decimal(u.Hz) if isinstance(neuropil_fr, u.Quantity) else neuropil_fr
-
-        # Convert the neuropil firing rates to decimal values in Hertz and digitize them
-        # based on the pre-defined bins stored in the class instance.
-        fn = lambda x: jnp.digitize(x, bins, True)
-        for _ in range(neuropil_fr.ndim - 1):
-            fn = jax.vmap(fn)
-        bin_indices = fn(neuropil_fr)
-        return bin_indices
-
-    def to_bin_rates(self, neuropil_fr: u.Quantity[u.Hz]):
-        """
-        Convert neuropil firing rates to the center value of their corresponding bins.
-
-        This method first maps the input firing rates to their bin indices using the
-        pre-defined bins, then computes the representative bin rate for each input
-        by taking the midpoint of the bin.
-
-        Parameters
-        ----------
-        neuropil_fr : u.Quantity[u.Hz]
-            Firing rates for each neuropil, specified in Hertz units.
-
-        Returns
-        -------
-        u.Quantity[u.Hz]
-            The center value of the bin corresponding to each input firing rate.
-        """
-        bin_indices = self.to_bin_indices(neuropil_fr)
-        fn = lambda index: self.bins[index]
-        for _ in range(bin_indices.ndim - 1):
-            fn = jax.vmap(fn)
-        return fn(bin_indices)
-
-    def sample_from_bin_indices(self, neuropil_bin_indices: jnp.ndarray):
-        assert self.space == 'linear', 'sampling only implemented for linear space'
-        shape = neuropil_bin_indices.shape
-        indices = neuropil_bin_indices.flatten()
-        sampling = brainstate.random.uniform(self.lowers[indices], self.uppers[indices])
-        return sampling.reshape(shape)
-
-
-class FilePath(NamedTuple):
-    """
-    A named tuple that stores and manages file paths for model checkpoints with their configuration parameters.
-
-    This class provides utilities for creating standardized file paths based on model parameters and
-    parsing existing file paths to extract those parameters.
-
-    Attributes
-    ----------
-    flywire_version : str
-        Version of the FlyWire connectome dataset ('630' or '783').
-    neural_activity_id : str
-        Identifier for the neural activity dataset (e.g., '2017-10-26_1').
-    neural_activity_max_fr : u.Quantity[u.Hz]
-        Maximum firing rate for normalization, specified in Hz units.
-    etrace_decay : float
-        Decay factor for eligibility traces (None or 0 for standard backprop).
-    loss_fn : str
-        Loss function used for training (e.g., 'mse', 'mae', 'huber').
-    conn_param_type : type
-        Parameter type for connection weights.
-    input_param_type : type
-        Parameter type for input weights.
-    scale_factor : u.Quantity[u.mV]
-        Scaling factor for synaptic weights, specified in mV units.
-    n_rank : int
-        Rank for low-rank approximation in LoRA.
-    sim_before_train : float
-        Proportion of steps to simulate before recording eligibility traces.
-    bin_size : u.Quantity[u.Hz]
-        Size of bins for firing rate discretization, specified in Hz units.
-    split: float
-        The proportion of data used for training.
-    """
-    flywire_version: str
-    neural_activity_id: str
-    neural_activity_max_fr: u.Quantity[u.Hz]
-    etrace_decay: float
-    loss_fn: str
-    conn_param_type: type
-    input_param_type: type
-    scale_factor: u.Quantity[u.mV]
-    n_rank: int
-    sim_before_train: float
-    split: float
-    fitting_target: str = 'csr'
-
-    def to_filepath(self):
-        """
-        Convert the configuration parameters to a standardized filepath string.
-
-        Creates a filepath string by concatenating all configuration parameters with '#' delimiters,
-        converting quantities to their decimal representations with appropriate units.
-
-        Returns
-        -------
-        str
-            A filepath string containing all parameters in a standardized format:
-            'results/flywire_version#neural_activity_id#max_fr#etrace_decay#loss_fn#...'
-        """
-        return (
-            f'results/'
-            f'{self.flywire_version}#'
-            f'{self.neural_activity_id}#'
-            f'{self.neural_activity_max_fr.to_decimal(u.Hz)}#'
-            f'{self.etrace_decay}#'
-            f'{self.loss_fn}#'
-            f'{self.conn_param_type.__name__}#'
-            f'{self.input_param_type.__name__}#'
-            f'{self.scale_factor.to_decimal(u.mV):5f}#'
-            f'{self.n_rank}#'
-            f'{self.sim_before_train}#'
-            f'{self.split}#'
-            f'{self.fitting_target}#'
-        )
-
-    @classmethod
-    def from_filepath(cls, filepath):
-        """
-        Parse a filepath string to extract model configuration parameters.
-
-        This method extracts all configuration parameters from a delimited filepath string,
-        converts them to appropriate types, and creates a new FilePath instance.
-
-        Parameters
-        ----------
-        filepath : str
-            A filepath string in the format generated by to_filepath().
-            Expected format: 'path/to/results/flywire_version#neural_activity_id#max_fr#etrace_decay#...'
-
-        Returns
-        -------
-        FilePath
-            A new FilePath instance with parameters extracted from the filepath.
-        """
-        setting = filepath.split('/')[1].split('#')
-        flywire_version = setting[0]
-        neural_activity_id = setting[1]
-        max_firing_rate = float(setting[2]) * u.Hz
-        etrace_decay = float(setting[3])
-        loss_fn = setting[4]
-        conn_param_type = setting[5]
-        input_param_type = setting[6]
-        scale_factor = float(setting[7]) * u.mV
-        n_rank = int(setting[8])
-        sim_before_train = float(setting[9])
-        split = float(setting[11])
-        fitting_target = setting[12] if len(setting) > 12 else 'lora'
-
-        return cls(
-            flywire_version=flywire_version,
-            neural_activity_id=neural_activity_id,
-            neural_activity_max_fr=max_firing_rate,
-            etrace_decay=etrace_decay,
-            loss_fn=loss_fn,
-            conn_param_type=getattr(brainscale, conn_param_type),
-            input_param_type=getattr(brainscale, input_param_type),
-            scale_factor=scale_factor,
-            n_rank=n_rank,
-            sim_before_train=sim_before_train,
-            split=split,
-            fitting_target=fitting_target,
-        )
-
-
 class NeuralData:
     """
     A class for handling neural activity data from the Drosophila brain.
@@ -988,6 +684,58 @@ class NeuralData:
     and provides methods for data conversion between neuron and neuropil levels.
     It supports data loading, preprocessing, and iteration for training neural networks.
 
+    Parameters
+    ----------
+    flywire_version : str
+        Version identifier for the FlyWire connectome dataset ('630' or '783').
+    neural_activity_id : str
+        Identifier for the neural activity dataset to load.
+    split : float, optional
+        Proportion of data to use for training vs. testing, defaults to 0.5.
+    neural_activity_max_fr : u.Quantity, optional
+        Maximum firing rate for neural activity, defaults to 120 Hz.
+    duration_per_data : u.Quantity, optional
+        Duration of each data sample, defaults to 20.0 ms.
+    duration_per_fr : u.Quantity, optional
+        Duration for firing rate calculation, defaults to 20.0 ms.
+    n_fr_per_warmup : int, optional
+        Number of firing rate samples for warmup phase, defaults to 10.
+    n_fr_per_train : int, optional
+        Number of firing rate samples for training phase, defaults to 90.
+    interpolation : str, optional
+        Method for interpolating firing rates, defaults to 'linear'.
+    noise_sigma : float, optional
+        Standard deviation of noise added to firing rates, defaults to 0.0.
+
+    Attributes
+    ----------
+    neuropils : numpy.ndarray
+        Names of neuropils (brain regions) in the dataset.
+    spike_rates : u.Quantity
+        Neural firing rate data with shape [time, neuropil].
+    neuropil_to_connectivity : brainstate.util.NestedDict
+        Dictionary mapping neuropil names to connectivity information.
+    n_train : int
+        Number of samples in the training dataset.
+    n_test : int
+        Number of samples in the testing dataset.
+
+    Methods
+    -------
+    n_neuropil
+        Returns the number of neuropils in the dataset.
+    n_time
+        Returns the number of time points in the dataset.
+    count_neuropil_fr(neuron_fr)
+        Converts firing rates from neuron-level to neuropil-level.
+    train_data
+        Returns the training portion of the spike rate data.
+    test_data
+        Returns the testing portion of the spike rate data.
+    iter_train_data(batch_size)
+        Iterates over the training data in batches.
+    iter_test_data(batch_size)
+        Iterates over the testing data in batches.
     """
 
     def __init__(
@@ -997,39 +745,39 @@ class NeuralData:
         split: float = 0.5,
         neural_activity_max_fr: u.Quantity = 120 * u.Hz,
         duration_per_data: u.Quantity = 20.0 * u.ms,
-        duration_per_grad: u.Quantity = 20.0 * u.ms,
-        n_warmup_per_train: int = 10,
-        n_target_per_train: int = 90,
-        n_gap_per_train: int = 10,
+        duration_per_fr: u.Quantity = 20.0 * u.ms,
+        n_fr_per_warmup: int = 10,
+        n_fr_per_train: int = 90,
+        n_fr_per_gap: int = 100,
         interpolation: str = 'linear',
         noise_sigma: float = 0.
     ):
         # neural activity data
         self.neural_activity_id = neural_activity_id
-        data = np.load(f'./data/spike_rates/ito_{neural_activity_id}_spike_rate.npz')
+        data = np.load(os.path.join(data_path, f'spike_rates/ito_{neural_activity_id}_spike_rate.npz'))
         self.neuropils = data['areas'][1:]
         self.duration_per_data = duration_per_data
-        self.duration_per_grad = duration_per_grad
-        self.n_train_per_data = int(duration_per_data / duration_per_grad)
-        self.n_step_per_grad = int(duration_per_grad / brainstate.environ.get_dt())
-        self.n_warmup_per_train = n_warmup_per_train
-        self.n_target_per_train = n_target_per_train
-        self.n_gap_per_train = n_gap_per_train
+        self.duration_per_fr = duration_per_fr
+        self.n_train_per_data = int(duration_per_data / duration_per_fr)
+        self.n_step_per_grad = int(duration_per_fr / brainstate.environ.get_dt())
+        self.n_fr_per_warmup = n_fr_per_warmup
+        self.n_fr_per_train = n_fr_per_train
+        self.n_fr_per_gap = n_fr_per_gap
         self.interpolation = interpolation
         self.noise_sigma = noise_sigma
 
         self.spike_rates = u.math.asarray(data['rates'][1:] * neural_activity_max_fr).T  # [time, neuropil]
         xs = jnp.arange(self.spike_rates.shape[0]) * duration_per_data
-        xvals = jnp.arange(self.spike_rates.shape[0] * self.n_train_per_data) * duration_per_grad
+        xvals = jnp.arange(self.spike_rates.shape[0] * self.n_train_per_data) * duration_per_fr
         fn = lambda ys: u.math.interp(xvals / u.ms, xs / u.ms, ys / u.Hz)
         self.spike_rates = np.asarray(jax.vmap(fn, in_axes=1, out_axes=1)(self.spike_rates)) * u.Hz
 
         # connectivity data, which show a given neuropil contains which connections
         print('Loading connectivity information ...')
         if flywire_version in ['783', 783]:
-            conn_path = 'data/783_connections_processed.csv'
+            conn_path = os.path.join(data_path, '783_connections_processed.csv')
         elif flywire_version in ['630', 630]:
-            conn_path = 'data/630_connections_processed.csv'
+            conn_path = os.path.join(data_path, '630_connections_processed.csv')
         else:
             raise ValueError('flywire_version must be either "783" or "630"')
         connectivity = pd.read_csv(conn_path)
@@ -1041,19 +789,13 @@ class NeuralData:
             post_indices = connectivity['post_index'][position].values
             syn_count = connectivity['syn_count'][position].values
             # pre/post-synaptic indices and counts
-            (
-                pre_indices,
-                pre_counts,
-                post_indices,
-                post_counts,
-            ) = count_pre_post_connections(pre_indices, post_indices, syn_count)
+            (pre_indices, pre_counts, post_indices, post_counts) = (
+                count_pre_post_connections(pre_indices, post_indices, syn_count))
             pre_weights = pre_counts / pre_counts.sum()
             post_weights = post_counts / post_counts.sum()
             neuropil_to_connectivity[neuropil] = brainstate.util.NestedDict(
-                pre_indices=pre_indices,
-                post_indices=post_indices,
-                pre_weights=pre_weights,
-                post_weights=post_weights,
+                pre_indices=pre_indices, post_indices=post_indices,
+                pre_weights=pre_weights, post_weights=post_weights,
             )
         self.neuropil_to_connectivity = neuropil_to_connectivity
 
@@ -1116,8 +858,7 @@ class NeuralData:
         neuropil-level firing rates using the connectivity information.
 
         Args:
-            spike_count: Count of spikes for each neuron.
-            length (int): Time window length for rate calculation.
+            neuron_fr: u.Quantity. Firing rates for each neuron in the population, specified in Hz units.
 
         Returns:
             u.Quantity: Firing rates for each neuropil, in Hz units.
@@ -1149,7 +890,7 @@ class NeuralData:
         """
         return self.spike_rates[self.n_train:]
 
-    def iter_train_data(self, batch_size: int = 128):
+    def iter_train_data_v1(self, batch_size: int = 128, n_batch: int = 100):
         """
         Iterate over the neural activity training data in batches.
 
@@ -1161,69 +902,57 @@ class NeuralData:
                 - input_neuropil_fr: Input firing rates transformed to embeddings
                 - output_neuropil_fr: Target output firing rates for the next time step
         """
+        assert self.noise_sigma > 0., "Noise sigma must be greater than 0 to add noise to the data."
+        data = self.spike_rates.mantissa[: self.n_fr_per_warmup]
+        target = self.spike_rates.mantissa[1:self.n_fr_per_warmup + 1]
+        i_start = self.n_fr_per_warmup + 1
+        predict = self.spike_rates.mantissa[i_start: i_start + self.n_fr_per_train]
+        targets = np.expand_dims(target, axis=1) * u.Hz
+        predicts = np.expand_dims(predict, axis=1) * u.Hz
+
+        for i in range(n_batch):
+            inputs = np.maximum(np.random.normal(data, data * self.noise_sigma, (batch_size,) + data.shape), 0.)
+            inputs = np.transpose(np.asarray(inputs), (1, 0, 2)) * u.Hz
+            yield inputs, targets, predicts
+
+    def iter_train_data_v2(self, batch_size: int = 128):
+        """
+        Iterate over the neural activity training data in batches.
+
+        Provides batches of data for training, where each batch contains input firing rates
+        and their corresponding target output firing rates for the next time step.
+
+        Yields:
+            Tuple[u.Quantity, u.Quantity]: A tuple containing:
+                - input_neuropil_fr: Input firing rates transformed to embeddings
+                - output_neuropil_fr: Target output firing rates for the next time step
+        """
+
         print('Number of training data:', self.n_train)
         data = self.spike_rates.mantissa
         if self.noise_sigma > 0.:
-            data = np.maximum(np.random.normal(data, data * self.noise_sigma), 0.)
+            input_data = np.maximum(np.random.normal(data, data * self.noise_sigma), 0.)
+        else:
+            input_data = data
 
-        inputs, targets = [], []
-        for i in range(
-            0,
-            self.n_train - self.n_warmup_per_train - self.n_target_per_train,
-            self.n_gap_per_train
-        ):
-            i1 = i + self.n_warmup_per_train
-            i2 = i1 + self.n_target_per_train
-            input_neuropil_fr = data[i: i1]
-            output_neuropil_fr = data[i1: i2]
-            inputs.append(input_neuropil_fr)
-            targets.append(output_neuropil_fr)
+        inputs, targets, predicts = [], [], []
+        for i in range(0, self.n_train - self.n_fr_per_warmup - self.n_fr_per_train, self.n_fr_per_gap):
+            i1 = i + self.n_fr_per_warmup
+            i3 = i1 + self.n_fr_per_train
+            inputs.append(input_data[i: i1])
+            targets.append(data[i + 1: i1 + 1])
+            predicts.append(data[i1 + 1: i3])
             if len(inputs) == batch_size:
                 inputs = np.transpose(np.asarray(inputs), (1, 0, 2)) * u.Hz
                 targets = np.transpose(np.asarray(targets), (1, 0, 2)) * u.Hz
-                yield inputs, targets
-                inputs, targets = [], []
+                predicts = np.transpose(np.asarray(predicts), (1, 0, 2)) * u.Hz
+                yield inputs, targets, predicts
+                inputs, targets, predicts = [], [], []
         if len(inputs) > 0:
             inputs = np.transpose(np.asarray(inputs), (1, 0, 2)) * u.Hz
             targets = np.transpose(np.asarray(targets), (1, 0, 2)) * u.Hz
-            yield inputs, targets
-
-    def iter_test_data(self, batch_size: int = 512):
-        """
-        Iterate over the neural activity training data in batches.
-
-        Provides batches of data for training, where each batch contains input firing rates
-        and their corresponding target output firing rates for the next time step.
-
-        Yields:
-            Tuple[u.Quantity, u.Quantity]: A tuple containing:
-                - input_neuropil_fr: Input firing rates transformed to embeddings
-                - output_neuropil_fr: Target output firing rates for the next time step
-        """
-        print('Number of testing data:', self.n_test)
-        data = self.spike_rates.mantissa
-
-        inputs, targets = [], []
-        for i in range(
-            self.n_train,
-            self.n_time - self.n_warmup_per_train - self.n_target_per_train,
-            self.n_gap_per_train
-        ):
-            i1 = i + self.n_warmup_per_train
-            i2 = i1 + self.n_target_per_train
-            input_neuropil_fr = data[i: i1]
-            output_neuropil_fr = data[i1: i2]
-            inputs.append(input_neuropil_fr)
-            targets.append(output_neuropil_fr)
-            if len(inputs) == batch_size:
-                inputs = np.transpose(np.asarray(inputs), (1, 0, 2)) * u.Hz  # [n_time, n_batch, n_neuropil]
-                targets = np.transpose(np.asarray(targets), (1, 0, 2)) * u.Hz  # [n_time, n_batch, n_neuropil]
-                yield inputs, targets
-                inputs, targets = [], []
-        if len(inputs) > 0:
-            inputs = np.transpose(np.asarray(inputs), (1, 0, 2)) * u.Hz
-            targets = np.transpose(np.asarray(targets), (1, 0, 2)) * u.Hz
-            yield inputs, targets
+            predicts = np.transpose(np.asarray(predicts), (1, 0, 2)) * u.Hz
+            yield inputs, targets, predicts
 
 
 class Population(brainstate.nn.Neuron):
@@ -1250,18 +979,10 @@ class Population(brainstate.nn.Neuron):
         The reset potential of the neurons after a spike, defaults to 0 mV
     v_th : u.Quantity, optional
         The threshold potential of the neurons for spiking, defaults to 1 mV
-    tau_m : u.Quantity, optional
-        The membrane time constant of the neurons, defaults to 20 ms
-    tau_syn : u.Quantity, optional
-        The synaptic time constant of the neurons, defaults to 5 ms
-    tau_ref : u.Quantity or None, optional
+    tau_ref : u.Quantity, optional
         The refractory period of the neurons, defaults to 2.2 ms
     spk_fun : Callable, optional
         The spike function of the neurons, defaults to ReluGrad with width=1.5
-    V_init : Callable, optional
-        Initialization function for membrane voltage, defaults to Constant(0 mV)
-    g_init : Callable, optional
-        Initialization function for synaptic conductance, defaults to Constant(0 mV)
     name : str, optional
         The name of the population
     """
@@ -1272,23 +993,17 @@ class Population(brainstate.nn.Neuron):
         v_rest: u.Quantity = 0 * u.mV,  # resting potential
         v_reset: u.Quantity = 0 * u.mV,  # reset potential after spike
         v_th: u.Quantity = 1 * u.mV,  # potential threshold for spiking
-        tau_m: u.Quantity = 20 * u.ms,  # membrane time constant
-        # Jürgensen et al https://doi.org/10.1088/2634-4386/ac3ba6
-        tau_syn: u.Quantity = 5 * u.ms,  # synaptic time constant
-        # Lazar et al https://doi.org/10.7554/eLife.62362
         tau_ref: u.Quantity | None = 2.2 * u.ms,  # refractory period
         spk_fun: Callable = brainstate.surrogate.ReluGrad(width=1.5),  # spike function
-        V_init: Callable = brainstate.init.Constant(0 * u.mV),  # initial voltage
-        g_init: Callable = brainstate.init.Constant(0. * u.mV),  # initial voltage
         name: str = None,
     ):
         # connectome data
         if flywire_version in ['783', 783]:
-            path_neu = 'data/Completeness_783.csv'
-            path_syn = 'data/Connectivity_783.parquet'
+            path_neu = os.path.join(data_path, 'Completeness_783.csv')
+            path_syn = os.path.join(data_path, 'Connectivity_783.parquet')
         elif flywire_version in ['630', 630]:
-            path_neu = 'data/Completeness_630_final.csv'
-            path_syn = 'data/Connectivity_630_final.parquet'
+            path_neu = os.path.join(data_path, 'Completeness_630_final.csv')
+            path_syn = os.path.join(data_path, 'Connectivity_630_final.parquet')
         else:
             raise ValueError('flywire_version must be either "783" or "630"')
         self.flywire_version = flywire_version
@@ -1309,20 +1024,22 @@ class Population(brainstate.nn.Neuron):
         self.v_rest = v_rest
         self.v_reset = v_reset
         self.v_th = v_th
-        self.tau_m = brainscale.ElemWiseParam(jnp.ones(self.varshape) * tau_m)
-        self.tau_syn = brainscale.ElemWiseParam(jnp.ones(self.varshape) * tau_syn)
-        self.tau_m = tau_m
-        self.tau_syn = tau_syn
-        self.tau_ref = tau_ref if tau_ref is None else u.math.full(self.varshape, tau_ref)
+        dt = brainstate.environ.get_dt() / u.ms
+        self.tau_m_lim = [np.exp(-dt / 1), np.exp(-dt / 200)]
+        self.tan_syn_lim = [np.exp(-dt / 1), np.exp(-dt / 200)]
+        self.tau_m = brainscale.ElemWiseParam(
+            brainstate.random.uniform(self.tau_m_lim[0], self.tau_m_lim[1], self.varshape)
+        )
+        self.tau_syn = brainscale.ElemWiseParam(
+            brainstate.random.uniform(self.tan_syn_lim[0], self.tan_syn_lim[1], self.varshape)
+        )
+
+        self.tau_ref = tau_ref  # if tau_ref is None else u.math.full(self.varshape, tau_ref)
         self.spk_fun = spk_fun
 
-        # initializer
-        self.V_init = V_init
-        self.g_init = g_init
-
     def init_state(self):
-        self.v = brainscale.ETraceState(brainstate.init.param(self.V_init, self.varshape))
-        self.g = brainscale.ETraceState(brainstate.init.param(self.g_init, self.varshape))
+        self.v = brainscale.ETraceState(brainstate.init.param(v_init, self.varshape))
+        self.g = brainscale.ETraceState(brainstate.init.param(g_init, self.varshape))
         self.spike_count = brainscale.ETraceState(jnp.zeros(self.varshape))
         if self.tau_ref is not None:
             self.t_ref = brainstate.HiddenState(
@@ -1349,13 +1066,12 @@ class Population(brainstate.nn.Neuron):
 
     def update(self, x: u.Quantity[u.mV]):
         t = brainstate.environ.get('t')
+        neu_decay = jnp.clip(self.tau_m.execute(), min=self.tau_m_lim[0], max=self.tau_m_lim[1])
+        syn_decay = jnp.clip(self.tau_syn.execute(), min=self.tan_syn_lim[0], max=self.tan_syn_lim[1])
 
-        # numerical integration
-        dg = lambda g: -g / self.tau_syn
-        g = brainstate.nn.exp_euler_step(dg, self.g.value)
-        g += x  # external input current
-        dv = lambda v, g: (self.v_rest - v + g) / self.tau_m
-        v = brainstate.nn.exp_euler_step(dv, self.v.value, g)
+        # numerical integration + external input current
+        g = syn_decay * self.g.value + x
+        v = neu_decay * self.v.value + (1 - neu_decay) * (self.v_rest + g)  # synaptic filtering
         v = self.sum_delta_inputs(v)
 
         # refractory period
@@ -1378,33 +1094,25 @@ class Population(brainstate.nn.Neuron):
 
 
 class SparseLinear(brainstate.nn.Module):
-    """
-    A sparse linear transformation module for neural networks using a sparse connectivity matrix.
-
-    This class implements a linear transformation where the weight matrix is represented as a
-    sparse matrix (typically from connectome data). The weights are parameterized and can be
-    trained using eligibility traces or other learning rules. The sign of each connection is
-    preserved, and the absolute value of the weights is used for computation.
-
-    Parameters
-    ----------
-    sparse_mat : u.sparse.SparseMatrix
-        The sparse matrix representing the connectivity (weights) between neurons.
-    param_type : type, optional
-        The parameter class to use for the weights (default: brainscale.ETraceParam).
-    """
-
     def __init__(
         self,
         sparse_mat: u.sparse.SparseMatrix,
         param_type: type = brainscale.ETraceParam,
+        weight_mask: int = 0,
     ):
         super().__init__()
 
         assert isinstance(sparse_mat, u.sparse.SparseMatrix), '"weight" must be a brainunit.sparse.SparseMatrix.'
-        params = dict(weight=sparse_mat.data)
-        self.sign = np.where(sparse_mat.data > 0, 1, -1)
-        op = brainscale.SpMatMulOp(sparse_mat=sparse_mat, weight_fn=self.weight_fn)  # x @ sparse matrix
+
+        denominator = np.sum(sparse_mat.shape) / 2
+        stddev = (jnp.sqrt(2.0 / denominator) / .87962566103423978) * 0.02
+        weight = brainstate.random.truncated_normal(-2, 2, sparse_mat.data.shape) * stddev
+        params = dict(weight=weight.flatten())  # only train non-zero weights
+        if weight_mask == 1:
+            self.sign = np.where(u.get_mantissa(sparse_mat.data) > 0, 1, -1)
+            op = brainscale.SpMatMulOp(sparse_mat=sparse_mat, weight_fn=self.weight_fn)  # x @ sparse matrix
+        else:
+            op = brainscale.SpMatMulOp(sparse_mat=sparse_mat)  # x @ sparse matrix
         self.weight_op = param_type(params, op=op)
 
     def weight_fn(self, w):
@@ -1414,109 +1122,7 @@ class SparseLinear(brainstate.nn.Module):
         return self.weight_op.execute(x)
 
 
-class RecurrentNetwork(brainstate.nn.Module):
-    """
-    A module that handles synaptic interactions between neurons in a spiking network.
-
-    This class implements the synaptic connectivity and signal propagation between neurons
-    in a population, supporting both sparse connectivity from connectome data and
-    trainable low-rank approximation (LoRA) parameters for efficient learning.
-
-    The module manages synaptic delays and implements different connection modes,
-    particularly focusing on a combined sparse and low-rank connectivity approach
-    for computational efficiency while maintaining biological plausibility.
-
-    Parameters
-    ----------
-    pop : Population
-        The neural population containing the neurons that will interact.
-    scale_factor : u.Quantity
-        Scaling factor for the synaptic weights, specified with units.
-    conn_param_type : type, optional
-        Parameter type for connection weights (typically a brainscale parameter class),
-        defaults to brainscale.ETraceParam.
-    n_rank : int, optional
-        Rank for low-rank approximation in LoRA, defaults to 20.
-
-    """
-
-    def __init__(
-        self,
-        flywire_version: str,
-        scale_factor: u.Quantity,
-        conn_param_type: type = brainscale.ETraceParam,
-        n_rank: int = 20,
-        fitting_target: str = 'csr'
-    ):
-        super().__init__()
-
-        # fitting target
-        self.fitting_target = fitting_target
-
-        # neuronal and synaptic dynamics
-        self.pop = Population(
-            flywire_version,
-            V_init=v_init,
-            g_init=g_init,
-            tau_ref=5.0 * u.ms
-        )
-
-        # delay for changes in post-synaptic neuron
-        # Paul et al 2015 doi: https://doi.org/10.3389/fncel.2015.00029
-        self.delay = brainstate.nn.Delay(
-            jax.ShapeDtypeStruct(self.pop.varshape, brainstate.environ.dftype()),
-            entries={'D': 1.8 * u.ms}
-        )
-
-        print('Loading synapse information ...')
-        csr = load_syn(self.pop.flywire_version)
-
-        # connectivity matrix
-        self.scale_factor = scale_factor
-
-        if fitting_target == 'lora':
-            # do not train sparse connection
-            self.conn = brainstate.nn.SparseLinear(csr, b_init=None, param_type=brainstate.FakeState)
-
-            # train LoRA weights
-            self.lora = brainscale.nn.LoRA(
-                in_features=self.pop.in_size,
-                lora_rank=n_rank,
-                out_features=self.pop.out_size,
-                A_init=brainstate.init.LecunNormal(unit=u.mV),
-                param_type=conn_param_type
-            )
-
-        elif fitting_target == 'csr':
-            # do not train sparse connection
-            self.conn = SparseLinear(csr)
-
-        else:
-            raise ValueError('fitting_target must be either "lora" or "csr"')
-
-    def update(self, x=None):
-        # Update the input module for the neuron population delayed spikes
-        pre_spk = self.delay.at('D')
-        pre_spk = jax.lax.stop_gradient(pre_spk)
-
-        # compute recurrent connections and update neurons
-        inp = self.conn(brainevent.EventArray(pre_spk)) * self.scale_factor
-        if self.fitting_target == 'lora':
-            inp = inp + self.lora(pre_spk)
-
-        if x is None:
-            x = inp
-        else:
-            x += inp
-        spk = self.pop(x)
-
-        # update delay spikes
-        self.delay.update(jax.lax.stop_gradient(spk))
-
-        return spk
-
-
-class Input2CurrentEncoder(brainstate.nn.Module):
+class InputEncoder(brainstate.nn.Module):
     """
     A module for encoding background inputs to a neural population.
 
@@ -1532,328 +1138,296 @@ class Input2CurrentEncoder(brainstate.nn.Module):
     ----------
     n_in : int
         Number of input features in the embedding vector.
-    pop : Population
-        The neural population to which background input will be applied.
-    param_type : type, optional
-        Parameter type class for the encoder weights (typically a brainscale
-        parameter class that supports eligibility traces),
-        defaults to brainscale.ETraceParam.
+    n_rec : int
+        Number of the recurrent units.
     """
 
-    def __init__(
-        self,
-        n_in: int,
-        pop: Population,
-        param_type: type = brainscale.ETraceParam,
-        method: str = 'current',
-    ):
+    def __init__(self, n_in: int, n_rec: int):
         super().__init__()
-
-        self.method = method
-        assert method in ['current', 'noise'], 'type must be either "current" or "noise"'
-
-        # population
-        self.pop = pop
 
         # neural activity conversion
         self.encoder = brainstate.nn.Sequential(
             brainstate.nn.LayerNorm(n_in, use_scale=False, use_bias=False),
             brainscale.nn.Linear(
-                n_in,
-                self.pop.varshape,
-                w_init=brainstate.init.KaimingNormal(unit=u.mV),
-                b_init=brainstate.init.ZeroInit(unit=u.mV),
-                param_type=brainscale.NonTempParam
+                n_in, n_rec,
+                w_init=brainstate.init.KaimingNormal(scale=0.1),
+                b_init=brainstate.init.ZeroInit(),
             ),
-            brainscale.nn.ReLU()
+            brainscale.nn.ReLU(),
+            lambda x: x * u.mV
         )
 
     def update(self, firing_rate):
-        inputs = self.encoder(u.get_mantissa(firing_rate))
-
-        if self.method == 'noise':
-            brainstate.nn.poisson_input(
-                freq=20 * u.Hz,
-                num_input=1,
-                weight=inputs,
-                target=self.pop.v,
-                refractory=self.pop.get_refractory(),
-            )
-
-        elif self.method == 'current':
-            self.pop.add_delta_input('external-current', inputs)
-
-        else:
-            raise ValueError('unknown method, must be either "current" or "noise"')
+        res = self.encoder(u.get_mantissa(firing_rate))
+        return res
 
 
-class DrosophilaSpikingNetwork(brainstate.nn.Module):
-    """
-    A spiking neural network model for simulating firing rate patterns in the Drosophila brain.
-
-    This class implements a biologically plausible spiking neural network that models
-    neuronal activity in the Drosophila brain based on FlyWire connectome data.
-    It integrates neural population dynamics, synaptic interactions, and mechanisms
-    to process neural activity data for realistic brain simulation.
-
-    Parameters
-    ----------
-    n_neuropil : int
-        The number of neuropils in the Drosophila brain model.
-    flywire_version : str, optional
-        Version of the FlyWire connectome dataset ('630' or '783'), defaults to '630'
-    n_rank : int, optional
-        Rank for low-rank approximation in LoRA, defaults to 20
-    scale_factor : u.Quantity, optional
-        Scaling factor for sparse connectivity weights, defaults to 0.3*0.275/7 mV
-    conn_param_type : type, optional
-        Parameter type for connection weights, defaults to brainscale.ETraceParam
-    input_param_type : type, optional
-        Parameter type for input weights, defaults to brainscale.ETraceParam
-    """
-
+class RecurrentNetwork(brainstate.nn.Module):
     def __init__(
         self,
+        data: NeuralData,
         n_neuropil: int,
-        flywire_version: str = '630',
+        flywire_version: str,
         n_rank: int = 20,
-        scale_factor=0.3 * 0.275 / 7 * u.mV,
-        conn_param_type: type = brainscale.ETraceParam,
-        input_param_type: type = brainscale.ETraceParam,
-        fitting_target: str = 'lora'
+        tau_ref: float = 5.0,
+        weight_mask: int = 0,
+        fitting_target: str = 'csr',
+        input_method: str = 'current',
     ):
         super().__init__()
 
-        # parameters
-        self.flywire_version = flywire_version
+        self.data = data
+        self.fitting_target = fitting_target
+        self.input_method = input_method
+        self.n_neuropil = n_neuropil
 
-        # population and network
-        self.network = RecurrentNetwork(
-            flywire_version,
-            n_rank=n_rank,
-            scale_factor=scale_factor,
-            conn_param_type=conn_param_type,
-            fitting_target=fitting_target,
+        # neuronal dynamics
+        self.pop = Population(flywire_version, tau_ref=tau_ref if tau_ref is None else tau_ref * u.ms)
+
+        # delay for changes in post-synaptic neuron
+        # Paul et al 2015 doi: https://doi.org/10.3389/fncel.2015.00029
+        self.delay = brainstate.nn.Delay(
+            jax.ShapeDtypeStruct(self.pop.varshape, brainstate.environ.dftype()), entries={'D': 1.8 * u.ms}
         )
 
-        # input encoding
-        self.input_encoder = Input2CurrentEncoder(n_in=n_neuropil, pop=self.network.pop, param_type=input_param_type)
+        # synaptic dynamics
+        csr = load_syn(self.pop.flywire_version, 0.01)
+        if fitting_target == 'lora':
+            self.conn = brainstate.nn.SparseLinear(csr, b_init=None, param_type=brainstate.FakeState)
+            self.lora = brainscale.nn.LoRA(
+                in_features=self.pop.in_size,
+                lora_rank=n_rank,
+                out_features=self.pop.out_size,
+                A_init=brainstate.init.LecunNormal(),
+                param_type=brainscale.ETraceParam,
+            )
 
-    @property
-    def pop(self) -> Population:
-        return self.network.pop
+        elif fitting_target == 'csr':
+            self.conn = SparseLinear(csr, weight_mask=weight_mask)
 
-    def update(self, i, neuropil_fr_input):
+        else:
+            raise ValueError('fitting_target must be either "lora" or "csr"')
+
+        # inputs
+        self.input_encoder = InputEncoder(n_neuropil, self.pop.varshape)
+
+    def update(self, i, background_inputs):
         with brainstate.environ.context(i=i, t=i * brainstate.environ.get_dt()):
-            self.input_encoder(neuropil_fr_input)
-            return self.network()
+            # background inputs to the population
+            if self.input_method == 'noise':
+                brainstate.nn.poisson_input(freq=20 * u.Hz, num_input=1, weight=background_inputs,
+                                            target=self.pop.v, refractory=self.pop.get_refractory())
+            elif self.input_method == 'current':
+                self.pop.add_delta_input('external-current', background_inputs)
+            else:
+                raise ValueError('unknown method, must be either "current" or "noise"')
+
+            # recurrent connections
+            pre_spk = self.delay.at('D')
+            pre_spk = jax.lax.stop_gradient(pre_spk)
+            inp = self.conn(brainevent.EventArray(pre_spk))
+            if self.fitting_target == 'lora':
+                inp = inp + self.lora(pre_spk)
+
+            # update population dynamics
+            spk = self.pop(inp * u.mV)
+
+            # update delay spikes
+            self.delay.update(jax.lax.stop_gradient(spk))
+            return spk
 
 
-class DrosophilaSpikingNetTrainer:
-    """
-    A class for training spiking neural network models to simulate firing rate patterns
-    in Drosophila whole brain data.
-
-    This trainer implements a two-stage training approach:
-    1. First round: Trains a spiking neural network to match target neuropil firing rates
-    2. Second round (separate method): Trains a recurrent neural network to decode firing patterns
-
-    The class handles training of network parameters using gradient-based optimization with
-    eligibility traces for biologically plausible learning.
-
-    Parameters
-    ----------
-    sim_before_train : float, optional
-        Proportion of steps to simulate before recording eligibility traces, defaults to 0.5
-    lr : float, optional
-        Learning rate for the optimizer, defaults to 1e-3
-    etrace_decay : float or None, optional
-        Decay factor for eligibility traces (None or 0 for standard backprop), defaults to 0.99
-    grad_clip : float or None, optional
-        Maximum norm for gradient clipping, defaults to 1.0
-    neural_activity_id : str, optional
-        Identifier for neural activity dataset, defaults to '2017-10-26_1'
-    flywire_version : str, optional
-        Version of the FlyWire connectome dataset ('630' or '783'), defaults to '630'
-    max_firing_rate : u.Quantity, optional
-        Maximum firing rate for normalization, defaults to 100 Hz
-    loss_fn : str, optional
-        Loss function ('mse', 'mae', 'huber', 'cosine_distance', 'log_cosh'), defaults to 'mse'
-    vjp_method : str, optional
-        Method for vector-Jacobian product calculation, defaults to 'single-step'
-    n_rank : int, optional
-        Rank for low-rank approximation in LoRA, defaults to 20
-    conn_param_type : type, optional
-        Parameter type for connection weights, defaults to brainscale.ETraceParam
-    input_param_type : type, optional
-        Parameter type for input weights, defaults to brainscale.ETraceParam
-    scale_factor : u.Quantity, optional
-        Scaling factor for sparse connectivity weights, defaults to 0.01 mV
-    """
-
-    def __init__(
-        self,
-        sim_before_train: float = 0.5,
-        lr: float = 1e-3,
-        etrace_decay: float | None = 0.99,
-        grad_clip: float | None = 1.0,
-        neural_activity_id: str = '2017-10-26_1',
-        flywire_version: str = '630',
-        max_firing_rate: u.Quantity = 100. * u.Hz,
-        loss_fn: str = 'mse',
-        vjp_method: str = 'single-step',
-        n_rank: int = 20,
-        conn_param_type: type = brainscale.ETraceParam,
-        input_param_type: type = brainscale.ETraceParam,
-        scale_factor: u.Quantity = 0.01 * u.mV,
-        split: float = 0.7,
-        fitting_target: str = 'lora',
-        duration_per_train: u.Quantity = 10.0 * u.ms,
-    ):
+class DrosophilaSpikingNetworkTrainer:
+    def __init__(self, settings: Setting):
         # parameters
-        self.sim_before_train = sim_before_train
-        self.etrace_decay = etrace_decay
-        self.grad_clip = grad_clip
-        self.loss_fn = loss_fn
-        self.vjp_method = vjp_method
+        self.settings = settings
+        self.grad_clip = 1.0
 
         # inputs
         self.data = NeuralData(
-            flywire_version=flywire_version,
-            neural_activity_id=neural_activity_id,
-            split=split,
-            neural_activity_max_fr=max_firing_rate,
-            duration_per_grad=duration_per_train,
+            flywire_version=settings.flywire_version,
+            neural_activity_id=settings.neural_activity_id,
+            split=settings.split,
+            neural_activity_max_fr=settings.neural_activity_max_fr * u.Hz,
+            duration_per_data=settings.duration_per_data * u.ms,
+            duration_per_fr=settings.duration_per_fr * u.ms,
+            n_fr_per_warmup=settings.n_fr_per_warmup,
+            n_fr_per_train=settings.n_fr_per_train,
+            noise_sigma=settings.input_noise_sigma,
         )
 
         # population
-        self.target = DrosophilaSpikingNetwork(
+        self.target = RecurrentNetwork(
+            data=self.data,
             n_neuropil=self.data.n_neuropil,
-            flywire_version=flywire_version,
-            conn_param_type=conn_param_type,
-            input_param_type=input_param_type,
-            scale_factor=scale_factor,
-            n_rank=n_rank,
-            fitting_target=fitting_target,
+            flywire_version=settings.flywire_version,
+            n_rank=settings.n_lora_rank,
+            tau_ref=settings.tau_ref,
+            fitting_target=settings.fitting_target,
+            weight_mask=settings.weight_mask,
         )
 
         # optimizer
         self.trainable_weights = brainstate.graph.states(self.target, brainstate.ParamState)
-        self.opt = brainstate.optim.Adam(brainstate.optim.StepLR(lr, step_size=10, gamma=0.9))
+        # self.opt = brainstate.optim.Adam(brainstate.optim.StepLR(settings.lr, step_size=50, gamma=0.9))
+        self.opt = brainstate.optim.Adam(settings.lr)
         self.opt.register_trainable_weights(self.trainable_weights)
 
         # train save path
-        args = FilePath(
-            flywire_version=flywire_version,
-            neural_activity_id=neural_activity_id,
-            neural_activity_max_fr=max_firing_rate,
-            conn_param_type=conn_param_type,
-            input_param_type=input_param_type,
-            etrace_decay=etrace_decay,
-            loss_fn=loss_fn,
-            scale_factor=scale_factor,
-            n_rank=n_rank,
-            sim_before_train=sim_before_train,
-            split=split,
-            fitting_target=fitting_target,
-        )
-        self.filepath = f"{args.to_filepath()}#{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+        self.filepath = f"{settings.to_filepath()}#{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
 
     def _loss(self, predict_fr, target_fr):
         if self.data.noise_sigma > 0.:
             lowers = target_fr * (1 - self.data.noise_sigma)
             uppers = target_fr * (1 + self.data.noise_sigma)
             return u.get_mantissa(
-                u.math.mean(u.math.square(u.math.relu(lowers - predict_fr)) +
-                            u.math.square(u.math.relu(predict_fr - uppers)))
+                u.math.mean(
+                    u.math.square(u.math.relu(lowers - predict_fr)) +
+                    u.math.square(u.math.relu(predict_fr - uppers))
+                )
             )
         else:
             return u.get_mantissa(u.math.abs(predict_fr - target_fr).mean())
 
-    def _comp_grads(self, model, carry, inputs):
-        grads, prediction = carry
-        batch_index, target_activities = inputs
+    def _train_target_phase(self, model_and_etrace, carray, inputs):
+        grads, prediction = carray
+        i_run, input_activity, target_activity = inputs
+        indices = np.arange(self.data.n_step_per_grad) + i_run * self.data.n_step_per_grad
+        # simulation with eligibility trace recording
+        self.target.pop.reset_firing_rate()
+        bg_neuron_inputs = self.target.input_encoder(input_activity)
+        brainstate.compile.for_loop(lambda i: model_and_etrace(i, bg_neuron_inputs), indices[:-1])
+
+        def loss_fn():
+            bg_neuron_inputs_ = self.target.input_encoder(input_activity)
+            model_and_etrace(indices[-1], bg_neuron_inputs_)
+            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_fr)
+            predict_neuropil_fr_ = self.data.count_neuropil_fr(neuron_fr)
+            loss_ = self._loss(predict_neuropil_fr_, target_activity)
+            return loss_, predict_neuropil_fr_
+
+        new_grads, loss, predict_neuropil_fr = brainstate.augment.grad(
+            loss_fn, self.trainable_weights, return_value=True, has_aux=True)()
+        return (jax.tree.map(jnp.add, grads, new_grads), predict_neuropil_fr), loss
+
+    def _train_predict_phase(self, model, carry, inputs):
+        grads, input_neuropil_fr = carry
+        batch_index, target_activity = inputs
         indices = np.arange(self.data.n_step_per_grad) + batch_index * self.data.n_step_per_grad
 
         # simulation with eligibility trace recording
         self.target.pop.reset_firing_rate()
-        brainstate.compile.for_loop(lambda i: model(i, prediction), indices[:-1])
+        bg_neuron_inputs = self.target.input_encoder(input_neuropil_fr)
+        brainstate.compile.for_loop(lambda i: model(i, bg_neuron_inputs), indices[:-1])
 
         # gradients and optimizations
         def loss_fn():
-            model(indices[-1], prediction)
-            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_grad)
-            predict_neuropil_fr = self.data.count_neuropil_fr(neuron_fr)
-            loss_ = self._loss(predict_neuropil_fr, target_activities).mean()
-            return loss_, predict_neuropil_fr
+            bg_neuron_inputs_ = self.target.input_encoder(input_neuropil_fr)
+            model(indices[-1], bg_neuron_inputs_)
+            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_fr)
+            predict_neuropil_fr_ = self.data.count_neuropil_fr(neuron_fr)
+            loss_ = self._loss(predict_neuropil_fr_, target_activity)
+            return loss_, predict_neuropil_fr_
 
         new_grads, loss, predict_neuropil_fr = brainstate.augment.grad(
             loss_fn, self.trainable_weights, return_value=True, has_aux=True)()
         return (jax.tree.map(jnp.add, grads, new_grads), predict_neuropil_fr), loss
 
     @brainstate.compile.jit(static_argnums=0)
-    def batch_train(self, input_neuropil_fr, target_neuropil_fr):
+    def batch_train(self, input_neuropil_fr, target_neuropil_fr, predict_neuropil_fr):
         # input_neuropil_fr: [n_seq, n_batch, n_neuropil]
         # target_neuropil_fr: [n_seq, n_batch, n_neuropil]
         batch_size = input_neuropil_fr.shape[1]
 
         # model
-        if self.etrace_decay is None or self.etrace_decay == 0.:
+        if self.settings.etrace_decay == 0.:
             print('Using forward gradient backpropagation with D-RTRL.')
-            model_and_etrace = brainscale.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
+            model_and_etrace = brainscale.ParamDimVjpAlgorithm(self.target, vjp_method=self.settings.vjp_method)
         else:
             print('Using forward gradient backpropagation with ES-D-RTRL.')
-            model_and_etrace = brainscale.IODimVjpAlgorithm(self.target, self.etrace_decay, vjp_method=self.vjp_method)
+            model_and_etrace = brainscale.IODimVjpAlgorithm(
+                self.target, self.settings.etrace_decay, vjp_method=self.settings.vjp_method
+            )
 
         brainstate.nn.vmap_init_all_states(self.target, state_tag='hidden', axis_size=batch_size)
 
         @brainstate.augment.vmap_new_states(
-            state_tag='etrace',
-            axis_size=batch_size,
-            in_states=self.target.states('hidden')
+            state_tag='etrace', axis_size=batch_size, in_states=self.target.states('hidden')
         )
         def init():
-            model_and_etrace.compile_graph(0, jnp.zeros(input_neuropil_fr.shape[2:], dtype=dftype))
+            model_and_etrace.compile_graph(0, jnp.zeros(self.target.pop.varshape, dtype=dftype) * u.mV)
             model_and_etrace.show_graph()
 
         init()
         model_and_etrace = brainstate.nn.Vmap(model_and_etrace, vmap_states=('hidden', 'etrace'), in_axes=(None, 0))
 
-        def simulation(i_run, input_activity):
-            indices = np.arange(self.data.n_step_per_grad) + i_run * self.data.n_step_per_grad
-            # simulation with eligibility trace recording
-            self.target.pop.reset_firing_rate()
-            brainstate.compile.for_loop(lambda i: model_and_etrace(i, input_activity), indices)
-            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_grad)
-            predict_neuropil_fr = self.data.count_neuropil_fr(neuron_fr)
-            return predict_neuropil_fr
+        grads = jax.tree.map(lambda x: jnp.zeros_like(x), self.trainable_weights.to_dict_values())
 
         # whole-brain network warmup
-        prediction = brainstate.transform.for_loop(
-            simulation, np.arange(input_neuropil_fr.shape[0]), input_neuropil_fr)[-1]
-
-        # gradient computation and optimization
-        grads = jax.tree.map(lambda x: jnp.zeros_like(x), self.trainable_weights.to_dict_values())
-        (grads, prediction), loss = brainstate.transform.scan(
-            functools.partial(self._comp_grads, model_and_etrace),
-            (
-                grads,
-                prediction,
-            ),
-            (
-                np.arange(target_neuropil_fr.shape[0]) + input_neuropil_fr.shape[0],
-                target_neuropil_fr
-            ),
+        (grads, prediction), loss_phase1 = brainstate.transform.scan(
+            functools.partial(self._train_target_phase, model_and_etrace),
+            (grads, input_neuropil_fr[0]),
+            (np.arange(input_neuropil_fr.shape[0]), input_neuropil_fr, target_neuropil_fr)
         )
+
+        # prediction and training
+        (grads, prediction), loss_phase2 = brainstate.transform.scan(
+            functools.partial(self._train_predict_phase, model_and_etrace),
+            (grads, prediction),
+            (np.arange(predict_neuropil_fr.shape[0]) + input_neuropil_fr.shape[0], predict_neuropil_fr),
+        )
+
+        # gradient clipping and update
         max_g = jax.tree.map(lambda x: jnp.abs(x).max(), grads)
         if self.grad_clip is not None:
             grads = brainstate.functional.clip_grad_norm(grads, self.grad_clip)
         self.opt.update(grads)
 
-        return loss.mean(), max_g
+        return loss_phase1.mean() + loss_phase2.mean(), max_g
+
+    def f_train(self, train_epoch: int, checkpoint_path: str = None):
+        if checkpoint_path is not None:
+            braintools.file.msgpack_load(checkpoint_path, self.target.states(brainstate.ParamState))
+            filepath = new_filepath(checkpoint_path, self.settings)
+        else:
+            filepath = self.filepath
+
+        # training process
+        os.makedirs(filepath, exist_ok=True)
+        file = open(f'{filepath}/training-losses.txt', 'w')
+        try:
+            output(file, str(self.settings))
+            min_loss = np.inf
+            for i_epoch in range(train_epoch):
+                # training
+                i_batch = 0
+                all_loss = []
+                # for data in self.data.iter_train_data_v2(batch_size=self.settings.batch_size):
+                for data in self.data.iter_train_data_v1(batch_size=self.settings.batch_size, n_batch=10):
+                    t0 = time.time()
+                    loss, max_g = jax.block_until_ready(self.batch_train(*data))
+                    t1 = time.time()
+                    output(file, f'epoch={i_epoch}, train batch = {i_batch}, loss = {loss:.5f}, time = {t1 - t0:.5f}s')
+                    output(file, f'max_g = {max_g}')
+                    all_loss.append(loss)
+                    i_batch += 1
+                self.opt.lr.step_epoch()
+                train_loss = np.mean(all_loss)
+                lr = self.opt.lr()
+                output(file, f'epoch = {i_epoch}, train loss = {train_loss:.5f}, lr = {lr:.6f}')
+
+                # save checkpoint
+                if train_loss < min_loss:
+                    braintools.file.msgpack_save(
+                        f'{filepath}/checkpoint-best-loss={train_loss:.4f}.msgpack',
+                        self.trainable_weights,
+                    )
+                    min_loss = train_loss
+        finally:
+            file.close()
 
     @brainstate.compile.jit(static_argnums=0)
-    def batch_predict(self, input_neuropil_fr, target_neuropil_fr):
+    def batch_eval(self, input_neuropil_fr, target_neuropil_fr, predict_neuropil_fr):
         batch_size = input_neuropil_fr.shape[1]
         brainstate.nn.vmap_init_all_states(self.target, state_tag='hidden', axis_size=batch_size)
 
@@ -1865,112 +1439,61 @@ class DrosophilaSpikingNetTrainer:
             indices = np.arange(self.data.n_step_per_grad) + i_run * self.data.n_step_per_grad
             # simulation with eligibility trace recording
             self.target.pop.reset_firing_rate()
-            brainstate.compile.for_loop(lambda i: model(i, input_activity), indices)
-            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_grad)
-            predict_neuropil_fr = self.data.count_neuropil_fr(neuron_fr)
-            return predict_neuropil_fr
+            bg_neuron_inputs = self.target.input_encoder(input_activity)
+            brainstate.compile.for_loop(lambda i: model(i, bg_neuron_inputs), indices)
+            neuron_fr = self.target.pop.count_firing_rate(self.data.duration_per_fr)
+            predict_neuropil_fr_ = self.data.count_neuropil_fr(neuron_fr)
+            return predict_neuropil_fr_
 
-        neuropil_fr = brainstate.transform.for_loop(
+        neuropil_fr_phase1 = brainstate.transform.for_loop(
             simulation, np.arange(input_neuropil_fr.shape[0]), input_neuropil_fr
-        )[-1]
+        )
+        loss_phase1 = self._loss(neuropil_fr_phase1, target_neuropil_fr)
 
-        def simulation_and_loss(neuro_fr, inputs):
-            i_run, target_activity = inputs
-            predict_neuropil_fr = simulation(i_run, neuro_fr)
-            loss_ = self._loss(predict_neuropil_fr, target_activity).mean()
-            return predict_neuropil_fr, loss_
+        def simulation_and_loss(neuro_fr, i_run):
+            predict_neuropil_fr_ = simulation(i_run, neuro_fr)
+            return predict_neuropil_fr_, predict_neuropil_fr_
 
         # whole-brain network warmup
-        _, losses = brainstate.transform.scan(
+        _, neuropil_fr_phase2 = brainstate.transform.scan(
             simulation_and_loss,
-            neuropil_fr,
-            (np.arange(target_neuropil_fr.shape[0]) + input_neuropil_fr.shape[0], target_neuropil_fr)
+            neuropil_fr_phase1[-1],
+            np.arange(predict_neuropil_fr.shape[0]) + input_neuropil_fr.shape[0]
         )
-        return losses.mean()
+        loss_phase2 = self._loss(neuropil_fr_phase2, predict_neuropil_fr)
+        return loss_phase1 + loss_phase2, u.math.concatenate([neuropil_fr_phase1, neuropil_fr_phase2], axis=0)
 
-    def f_train(self, train_epoch: int, checkpoint_path: str = None, settings=None):
+    def f_eval(self, checkpoint_path: str):
         if checkpoint_path is not None:
-            braintools.file.msgpack_load(checkpoint_path, self.target.states(brainstate.ParamState))
-            filepath = os.path.join(os.path.dirname(checkpoint_path), 'new')
-            filepath = self.filepath
-            os.makedirs(filepath, exist_ok=True)
+            braintools.file.msgpack_load(checkpoint_path, self.trainable_weights)
+            filepath = os.path.join(os.path.dirname(checkpoint_path), 'prediction')
         else:
             filepath = self.filepath
-
-        # training process
         os.makedirs(filepath, exist_ok=True)
-        file = open(f'{filepath}/training-losses.txt', 'w')
-        try:
-            output(file, str(settings))
-            min_loss = np.inf
-            for i_epoch in range(train_epoch):
-                # training
-                i_batch = 0
-                all_loss = []
-                for input_neuropil_fr, target_neuropil_fr in self.data.iter_train_data():
-                    t0 = time.time()
-                    loss, max_g = jax.block_until_ready(self.batch_train(input_neuropil_fr, target_neuropil_fr))
-                    t1 = time.time()
-                    output(file,
-                           f'epoch = {i_epoch}, train batch = {i_batch}, loss = {loss:.5f}, time = {t1 - t0:.5f}s')
-                    output(file, f'max_g = {max_g}')
-                    all_loss.append(loss)
-                    i_batch += 1
-                self.opt.lr.step_epoch()
-                train_loss = np.mean(all_loss)
 
-                # testing
-                i_batch = 0
-                all_loss = []
-                for input_neuropil_fr, target_neuropil_fr in self.data.iter_test_data():
-                    t0 = time.time()
-                    loss = jax.block_until_ready(self.batch_predict(input_neuropil_fr, target_neuropil_fr))
-                    t1 = time.time()
-                    output(file, f'epoch = {i_epoch}, test batch = {i_batch}, loss = {loss:.5f}, time = {t1 - t0:.5f}s')
-                    all_loss.append(loss)
-                    i_batch += 1
-                test_loss = np.mean(all_loss)
-                output(file, f'epoch = {i_epoch}, train loss = {train_loss:.5f}, '
-                             f'test loss = {test_loss:.5f}, lr = {self.opt.lr():.6f}')
+        # testing
+        i_batch = 0
+        # for data in self.data.iter_train_data_v2(batch_size=self.settings.batch_size):
+        for data in self.data.iter_train_data_v1(batch_size=4, n_batch=1):
+            loss, predictions = jax.block_until_ready(self.batch_eval(*data))
+            input_neuropil_fr, target_neuropil_fr, predict_neuropil_fr = data
+            truths = u.math.concatenate([target_neuropil_fr, predict_neuropil_fr], axis=0)
+            for i in range(predictions.shape[1]):
+                self.visualize(predictions[:, i], truths[:, i], filename=f'{filepath}/test_batch_{i + i_batch}.png')
+            i_batch += predictions.shape[1]
+            print(f'Test batch = {i_batch}, loss = {loss}')
 
-                # save checkpoint
-                if test_loss < min_loss:
-                    braintools.file.msgpack_save(
-                        f'{filepath}/checkpoint-best-loss={test_loss:.4f}.msgpack',
-                        self.trainable_weights,
-                    )
-                    min_loss = test_loss
-        finally:
-            file.close()
-
-    def _show_res(
-        self,
-        neuropil_fr: u.Quantity[u.Hz],
-        target_neuropil_fr: u.Quantity[u.Hz],
-        i_epoch: int,
-        i_batch: int,
-        n_neuropil_per_fig: int = 10,
-        filepath: str = None,
-    ):
-        filepath = filepath or self.filepath
-        fig, gs = braintools.visualize.get_figure(n_neuropil_per_fig, 2, 2., 10)
-        for i in range(n_neuropil_per_fig):
-            xticks = (i + 1 == n_neuropil_per_fig)
+    def visualize(self, predictions, groundtruth, filename: str = None):
+        # [n_seq, n_neuropil]
+        assert predictions.shape == groundtruth.shape, f'{predictions.shape} != {groundtruth.shape}'
+        n_neuropil = predictions.shape[1]
+        fig, gs = braintools.visualize.get_figure(n_neuropil, 1, 1, 20)
+        for i in range(n_neuropil):
             fig.add_subplot(gs[i, 0])
-            barplot(
-                self.data.neuropils,
-                neuropil_fr[i].to_decimal(u.Hz),
-                title='Simulated FR',
-                xticks=xticks
-            )
-            fig.add_subplot(gs[i, 1])
-            barplot(
-                self.data.neuropils,
-                target_neuropil_fr[i].to_decimal(u.Hz),
-                title='True FR',
-                xticks=xticks
-            )
-        filename = f'{filepath}/images/neuropil_fr-at-epoch-{i_epoch}-batch-{i_batch}.png'
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        plt.savefig(filename)
+            plt.plot(predictions[:, i], label='Predicted', color='blue')
+            plt.plot(groundtruth[:, i], label='Ground Truth', color='orange')
+            plt.legend()
+        if filename:
+            print('Saving figure to', filename)
+            plt.savefig(filename, dpi=300)
         plt.close()

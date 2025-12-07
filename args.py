@@ -128,7 +128,7 @@ def get_parser(gpu_pre_allocate=0.99):
             n_rnn_hidden = settings['n_rnn_hidden']
 
     else:
-        vjp_method = 'single-step'
+        vjp_method = 'multi-step'
         etrace_decay = 0.99
         dt = 0.2
         epoch_round1 = 200

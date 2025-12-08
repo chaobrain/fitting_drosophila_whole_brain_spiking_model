@@ -1,4 +1,4 @@
-# Copyright 2025 BDP Ecosystem Limited. All Rights Reserved.
+# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -73,8 +73,6 @@ and visualizing results for thorough analysis of network performance.
 """
 
 import os
-import platform
-import sys
 import time
 
 import matplotlib.pyplot as plt
@@ -85,22 +83,9 @@ from args import get_parser
 
 settings = get_parser()
 
-if (
-    platform.system() == 'Linux'
-    and
-    platform.platform() not in ['Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35']
-):
-    import matplotlib
-    matplotlib.use('Agg')
-
-sys.path.append('/mnt/d/codes/projects/brainscale')
-sys.path.append('/mnt/d/codes/projects/brainevent')
-sys.path.append('D:/codes/projects/brainscale')
-sys.path.append('D:/codes/projects/brainevent')
-
 import brainstate
 import braintools
-import brainscale
+import braintrace
 import brainunit as u
 import jax
 import jax.numpy as jnp
@@ -155,7 +140,7 @@ def _train_spiking_network(
                     f'batch = {i_batch}, '
                     f'loss = {loss:.5f}, '
                     f'bin acc = {acc:.5f}, '
-                    f'lr = {trainer.opt.lr():.6f}, '
+                    f'lr = {trainer.opt.current_lr:.6f}, '
                     f'time = {t1 - t0:.5f}s'
                 )
                 output(file, f'max_g = {max_g}')
@@ -174,7 +159,7 @@ def _train_spiking_network(
                 f'epoch = {i_epoch}, '
                 f'loss = {loss:.5f}, '
                 f'bin acc = {acc:.5f}, '
-                f'lr = {trainer.opt.lr():.6f}'
+                f'lr = {trainer.opt.current_lr:.6f}'
             )
             if acc > max_acc:
                 braintools.file.msgpack_save(
@@ -222,8 +207,8 @@ def first_round_train():
         max_firing_rate=settings.neural_activity_max_fr * u.Hz,
         loss_fn=settings.loss,
         scale_factor=settings.connectome_scale_factor * u.mV,
-        conn_param_type=brainscale.ETraceParam if settings.etrace_decay != 0. else brainscale.NonTempParam,
-        input_param_type=brainscale.ETraceParam if settings.etrace_decay != 0. else brainscale.NonTempParam,
+        conn_param_type=braintrace.ETraceParam if settings.etrace_decay != 0. else braintrace.NonTempParam,
+        input_param_type=braintrace.ETraceParam if settings.etrace_decay != 0. else braintrace.NonTempParam,
         bin_size=settings.bin_size * u.Hz,
         vjp_method=settings.vjp_method,
         n_rank=settings.n_lora_rank,
@@ -287,7 +272,7 @@ def first_round_generate_training_data(filepath: str):
     )
     brainstate.nn.init_all_states(net)
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def one_step(i, indices):
         input_embed = data.spike_rates[i] / u.Hz
         output_neuropil_fr = data.spike_rates[i + 1]
@@ -421,7 +406,7 @@ def second_round_loading(filepath):
         net.states(brainstate.LongTermState)
     )
     brainstate.nn.init_all_states(net)
-    outputs = brainstate.compile.for_loop(net, simulated_spike_rates)
+    outputs = brainstate.transform.for_loop(net, simulated_spike_rates)
 
     num = 5
     times = np.arange(simulated_spike_rates.shape[0]) / (1.2 * u.Hz)

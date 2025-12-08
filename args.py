@@ -1,4 +1,4 @@
-# Copyright 2025 BDP Ecosystem Limited. All Rights Reserved.
+# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,12 @@
 
 import argparse
 import os
+import platform
+
+if platform.system() != 'Windows':
+    import matplotlib
+
+    matplotlib.use('Agg')
 
 
 def _set_gpu_preallocation(mode: float):
@@ -129,7 +135,7 @@ def get_parser(gpu_pre_allocate=0.99):
             n_rnn_hidden = settings['n_rnn_hidden']
 
     else:
-        vjp_method = 'single-step'
+        vjp_method = 'multi-step'
         etrace_decay = 0.99
         dt = 0.2
         epoch_round1 = 200
@@ -152,7 +158,7 @@ def get_parser(gpu_pre_allocate=0.99):
     parser.add_argument("--vjp_method", type=str, default=vjp_method, choices=['multi-step', 'single-step'],
                         help="The method for computing the Jacobian-vector product (JVP).")
     parser.add_argument("--etrace_decay", type=float, default=etrace_decay,
-                        help="The time constant of eligibility trace ")
+                        help="The time constant of eligibility trace")
     parser.add_argument("--fitting_target", type=str, default='csr', choices=['lora', 'csr'])
 
     # training parameters

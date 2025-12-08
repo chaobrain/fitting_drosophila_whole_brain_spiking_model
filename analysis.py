@@ -1,4 +1,4 @@
-# Copyright 2025 BDP Ecosystem Limited. All Rights Reserved.
+# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import jax
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn
-import seaborn as sns
 
 
 def _extract_epoch_loss(file_path):
@@ -102,9 +101,10 @@ def visualize_dff_fr():
     plt.xlabel('Time [s]')
     plt.title('Simulated Firing Rate')
 
-    sns.despine()
+    seaborn.despine()
     # plt.savefig('dff-firing-rate.svg', transparent=True, dpi=500)
     plt.show()
+
 
 def visualize_dff():
     data = np.load('./data/spike_rates/ito_2017-10-26_1_spike_rate.npz')
@@ -137,7 +137,7 @@ def visualize_dff():
     plt.xlabel('Time [s]')
     plt.title('Deconvolved Firing Rate')
 
-    sns.despine()
+    seaborn.despine()
     plt.savefig('experimental-dff.svg', transparent=True, dpi=500)
     plt.show()
 
@@ -167,17 +167,17 @@ def compare_area_correlation():
     if orient == 'h':
         fig, gs = braintools.visualize.get_figure(1, 1, 12, 3)
         ax = fig.add_subplot(gs[0, 0])
-        ax = sns.barplot(x=correlations, y=areas, orient='h', ax=ax)
+        ax = seaborn.barplot(x=correlations, y=areas, orient='h', ax=ax)
         plt.xlabel('Correlation Coefficient')
-        sns.despine()
+        seaborn.despine()
         plt.axvline(x=0, color='gray', linestyle='--', alpha=0.7)
     else:
         fig, gs = braintools.visualize.get_figure(1, 1, 4, 10)
         ax = fig.add_subplot(gs[0, 0])
-        ax = sns.barplot(x=areas, y=correlations, orient='v', ax=ax)
+        ax = seaborn.barplot(x=areas, y=correlations, orient='v', ax=ax)
         plt.ylabel('Correlation Coefficient')
         plt.xticks(rotation=90)
-        sns.despine()
+        seaborn.despine()
         plt.title('Correlation of Simulated and Experimental Firing Rates')
 
     plt.savefig(f'area_correlations-{orient}.svg', transparent=True, dpi=500)
@@ -270,7 +270,6 @@ def plot_firing_rate_distribution():
 def list_data():
     for filepath in os.listdir('./data/spike_rates'):
         print(filepath.replace('ito_', '').replace('_spike_rate.npz', ''))
-
 
 
 if __name__ == '__main__':

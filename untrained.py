@@ -1,4 +1,4 @@
-# Copyright 2025 BDP Ecosystem Limited. All Rights Reserved.
+# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 import os
 
 from args import get_parser
+
 settings = get_parser()
 
 import brainstate
@@ -92,4 +93,3 @@ def _visualize_experimental_and_simulated_firing_rates_v3(filepath: str):
 drosophila = DrosophilaRestingStateModel(settings.filepath, load_checkpoint=False)
 drosophila.f_predict(filename='neuropil_fr_predictions_untrained')
 _visualize_experimental_and_simulated_firing_rates_v3(settings.filepath)
-

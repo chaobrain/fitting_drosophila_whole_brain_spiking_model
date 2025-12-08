@@ -22,7 +22,7 @@ This project requires two main datasets:
 
 We have also provided preprocessed data files in the `data/` directory for convenience.
 
-Please download the datasets (https://drive.google.com/file/d/1YeespJpoRfwS_kkH-VVuuFSJNgERcUK_/view?usp=drive_link) and place them in the appropriate directories (`data/`) as specified in the code.
+Please download the datasets (https://drive.google.com/file/d/1TPuHJ-IC1yQtL5TMngAjGJa_JAMdusnu/view?usp=drive_link) and place them in the appropriate directories (`data/`) as specified in the code.
 
 
 
@@ -73,21 +73,35 @@ The model generates visualizations comparing:
 Figures are saved in the output directory.
 
 
-## Citation 
+[//]: # (## Citation )
 
+[//]: # ()
+[//]: # ()
+[//]: # (If you use this code or data, please cite:)
 
-If you use this code or data, please cite:
+[//]: # ()
+[//]: # (```text)
 
-```text
-@article {Wang2024.09.24.614728,
-	author = {Wang, Chaoming and Dong, Xingsi and Ji, Zilong and Jiang, Jiedong and Liu, Xiao and Wu, Si},
-	title = {BrainScale: Enabling Scalable Online Learning in Spiking Neural Networks},
-	elocation-id = {2024.09.24.614728},
-	year = {2025},
-	doi = {10.1101/2024.09.24.614728},
-	publisher = {Cold Spring Harbor Laboratory},
-	URL = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728},
-	eprint = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728.full.pdf},
-	journal = {bioRxiv}
-}
-```
+[//]: # (@article {Wang2024.09.24.614728,)
+
+[//]: # (	author = {Wang, Chaoming and Dong, Xingsi and Ji, Zilong and Jiang, Jiedong and Liu, Xiao and Wu, Si},)
+
+[//]: # (	title = {BrainTrace: Enabling Scalable Online Learning in Spiking Neural Networks},)
+
+[//]: # (	elocation-id = {2024.09.24.614728},)
+
+[//]: # (	year = {2025},)
+
+[//]: # (	doi = {10.1101/2024.09.24.614728},)
+
+[//]: # (	publisher = {Cold Spring Harbor Laboratory},)
+
+[//]: # (	URL = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728},)
+
+[//]: # (	eprint = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728.full.pdf},)
+
+[//]: # (	journal = {bioRxiv})
+
+[//]: # (})
+
+[//]: # (```)

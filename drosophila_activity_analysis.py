@@ -1,4 +1,4 @@
-# Copyright 2025 BDP Ecosystem Limited. All Rights Reserved.
+# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,21 +17,15 @@
 
 import glob
 import os.path
-import platform
 import re
 
-if platform.system() != 'Windows':
-    import matplotlib
-
-    matplotlib.use('Agg')
-
-import pandas as pd
 import braintools
 import brainunit as u
 import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
-import jax.numpy as jnp
+import pandas as pd
 import seaborn
 from scipy.cluster.hierarchy import dendrogram, linkage
 from sklearn.decomposition import PCA

@@ -26,14 +26,13 @@
 
 """
 
-from __future__ import annotations
-
+import argparse
 import datetime
 import os
 import platform
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Dict
 
 from tqdm import tqdm
 
@@ -47,23 +46,124 @@ import numpy as np
 import pandas as pd
 
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '.99'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 os.environ['JAX_TRACEBACK_FILTERING'] = 'off'
+base_fn = './data'
+
+
+def dotdict_to_namespace(d: Dict) -> argparse.Namespace:
+    """
+    Recursively convert a dict-like / brainstate.util.DotDict into argparse.Namespace.
+    Nested mappings become nested Namespace objects.
+    """
+    ns = argparse.Namespace()
+    items = d.items()
+    for k, v in items:
+        if hasattr(v, 'items'):
+            setattr(ns, k, dotdict_to_namespace(v))
+        else:
+            setattr(ns, k, v)
+    return ns
+
+
+def parse_args():
+    """Parse command-line arguments for the workflow."""
+    parser = argparse.ArgumentParser(
+        description='Drosophila Whole Brain Activity Fitting',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Workflow control
+    parser.add_argument('--devices', type=str, default='0', help='GPU device IDs (e.g., "0" or "0,1")')
+    args, _ = parser.parse_known_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.devices
+    parser.add_argument('--filepath', type=str, default=None, help='Base directory path for checkpoints and results')
+    args, _ = parser.parse_known_args()
+    if args.filepath is not None:
+        with open(os.path.join(args.filepath, 'first-round-losses.txt'), 'r') as f:
+            line = f.readline().replace('Namespace', 'dict')
+            print(line)
+            import brainstate
+            res = brainstate.util.DotDict(eval(line))
+            res.filepath = args.filepath
+            res.devices = args.devices
+            return dotdict_to_namespace(res)
+
+    # Required arguments from README
+    parser.add_argument('--mode', type=str, default='all', choices=['all', 'train1', 'eval1', 'train2', 'evaluate'],
+                        help='Which stage(s) to run: all (complete pipeline), train1 (first round training), '
+                             'eval1 (generate training data), train2 (second round training), evaluate (evaluation)')
+    parser.add_argument('--flywire_version', type=str, default='630', choices=['630', '783'], help='Version of the FlyWire connectome data')
+    parser.add_argument('--neural_activity_id', type=str, default='2017-10-26_1', help='ID of the neural activity recording dataset')
+    parser.add_argument('--bin_size', type=float, default=0.25, help='Bin size for discretizing firing rates (Hz)')
+    parser.add_argument('--split', type=float, default=0.6, help='Train/test split ratio (currently informational)')
+    parser.add_argument('--epoch_round1', type=int, default=500, help='Number of epochs for first-round training')
+    parser.add_argument('--epoch_round2', type=int, default=1000, help='Number of epochs for second-round training')
+
+    # Additional hyperparameters
+    parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate for first-round training')
+    parser.add_argument('--lr_round2', type=float, default=1e-3, help='Learning rate for second-round training')
+    parser.add_argument('--etrace_decay', type=float, default=0.99, help='Decay factor for eligibility traces (0 for non-temporal)')
+    parser.add_argument('--scale_factor', type=float, default=0.000825, help='Scale factor for synaptic connections (mV)')
+    parser.add_argument('--n_rank', type=int, default=20, help='LoRA rank for low-rank adaptation')
+    parser.add_argument('--sim_before_train', type=float, default=0.1, help='Fraction of simulation steps before training')
+    parser.add_argument('--noise_sigma', type=float, default=0.05, help='Noise sigma for data augmentation')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--max_firing_rate', type=float, default=100.0, help='Maximum firing rate for neural activity (Hz)')
+    parser.add_argument('--n_hidden', type=int, default=256, help='RNN hidden size for second-round training')
+    parser.add_argument('--seed', type=int, default=2025, help='Random seed for reproducibility')
+    parser.add_argument('--dt', type=float, default=0.2, help='Time step for simulation (ms)')
+    parser.add_argument('--loss_fn', type=str, default='mse', choices=['mse', 'mae', 'huber', 'cosine_distance', 'log_cosh'], help='Loss function for training')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value (None for no clipping)')
+
+    # Input style for second-round training
+    parser.add_argument('--input_style', type=str, default='v1', choices=['v1', 'v2'], help='Input style for second-round training')
+
+    args = parser.parse_args()
+
+    # Auto-generate filepath if not provided
+    if args.filepath is None:
+        import datetime
+        time_ = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        # Determine param type names based on etrace_decay
+        param_type_name = 'ETraceParam' if args.etrace_decay != 0. else 'NonTempParam'
+        args.filepath = (
+            f'results/'
+            f'v4_2/'
+            f'{args.flywire_version}#'
+            f'{args.neural_activity_id}#'
+            f'{args.max_firing_rate}Hz#'
+            f'{args.etrace_decay}#'
+            f'{args.loss_fn}#'
+            f'{param_type_name}#'  # conn_param_type name
+            f'{param_type_name}#'  # input_param_type name
+            f'{args.scale_factor:.6f}#'
+            f'{args.n_rank}#'
+            f'{args.sim_before_train}#'
+            f'{args.seed}#'
+            f'{args.bin_size}#'
+            f'{args.noise_sigma}#'
+            f'{time_}'
+        )
+    print(args)
+
+    return args
+
+
+settings = parse_args()
 
 import brainevent
 import brainstate
 import braintools
 import brainscale
+import brainpy
 import brainunit as u
 import jax
 import jax.numpy as jnp
 
 from utils import g_init, v_init, count_pre_post_connections, barplot, output
 
-base_fn = './data'
 
-
-class Population(brainstate.nn.Neuron):
+class Population(brainpy.state.Neuron):
     """
     A population of neurons with leaky integrate-and-fire dynamics.
 
@@ -96,9 +196,9 @@ class Population(brainstate.nn.Neuron):
         tau_syn: u.Quantity = 5 * u.ms,  # synaptic time constant
         # Lazar et al https://doi.org/10.7554/eLife.62362
         tau_ref: u.Quantity | None = 2.2 * u.ms,  # refractory period
-        spk_fun: Callable = brainstate.surrogate.ReluGrad(width=1.5),  # spike function
-        V_init: Callable = brainstate.init.Constant(0 * u.mV),  # initial voltage
-        g_init: Callable = brainstate.init.Constant(0. * u.mV),  # initial voltage
+        spk_fun: Callable = braintools.surrogate.ReluGrad(width=1.5),  # spike function
+        V_init: Callable = braintools.init.Constant(0 * u.mV),  # initial voltage
+        g_init: Callable = braintools.init.Constant(0. * u.mV),  # initial voltage
         name: str = None,
     ):
         # connectome data
@@ -140,22 +240,22 @@ class Population(brainstate.nn.Neuron):
         self.g_init = g_init
 
     def init_state(self):
-        self.v = brainscale.ETraceState(brainstate.init.param(self.V_init, self.varshape))
-        self.g = brainscale.ETraceState(brainstate.init.param(self.g_init, self.varshape))
-        self.spike_count = brainscale.ETraceState(jnp.zeros(self.varshape, dtype=brainstate.environ.dftype()))
+        self.v = brainstate.HiddenState(braintools.init.param(self.V_init, self.varshape))
+        self.g = brainstate.HiddenState(braintools.init.param(self.g_init, self.varshape))
+        self.spike_count = brainstate.HiddenState(jnp.zeros(self.varshape, dtype=brainstate.environ.dftype()))
         if self.tau_ref is not None:
             self.t_ref = brainstate.ShortTermState(
-                brainstate.init.param(brainstate.init.Constant(-1e7 * u.ms), self.varshape)
+                braintools.init.param(braintools.init.Constant(-1e7 * u.ms), self.varshape)
             )
 
     def reset_state(self):
         self.reset_spk_count()
-        self.v.value = brainstate.init.param(self.V_init, self.varshape)
+        self.v.value = braintools.init.param(self.V_init, self.varshape)
         if self.tau_ref is not None:
-            self.t_ref.value = brainstate.init.param(brainstate.init.Constant(-1e7 * u.ms), self.varshape)
+            self.t_ref.value = braintools.init.param(braintools.init.Constant(-1e7 * u.ms), self.varshape)
 
     def reset_spk_count(self, batch_size=None):
-        self.spike_count.value = brainstate.init.param(jnp.zeros, self.varshape, batch_size)
+        self.spike_count.value = braintools.init.param(jnp.zeros, self.varshape, batch_size)
 
     def get_refractory(self):
         if self.tau_ref is None:
@@ -293,9 +393,13 @@ class Interaction(brainstate.nn.Module):
                 in_features=self.pop.in_size,
                 lora_rank=n_rank,
                 out_features=self.pop.out_size,
-                A_init=brainstate.init.LecunNormal(unit=u.mV),
+                A_init=braintools.init.LecunNormal(unit=u.mV),
                 param_type=conn_param_type
             )
+
+        elif conn_mode == 'sparse':
+            # only use sparse connection
+            self.conn = brainscale.nn.SparseLinear(csr, b_init=None)
 
         else:
             raise ValueError('conn_mode must be either "sparse" or "sparse+low+rank"')
@@ -315,8 +419,8 @@ class Interaction(brainstate.nn.Module):
         pre_spk = jax.lax.stop_gradient(pre_spk)
 
         # compute recurrent connections and update neurons
+        inp = self.conn(brainevent.EventArray(pre_spk)) * self.scale_factor
         if self.conn_mode == 'sparse+low+rank':
-            inp = self.conn(brainevent.EventArray(pre_spk)) * self.scale_factor
             inp = inp + self.lora(pre_spk)
         else:
             raise ValueError('mode must be either "sparse" or "sparse+low+rank')
@@ -460,11 +564,11 @@ class NeuralActivity(brainstate.nn.Module):
             brainscale.nn.Linear(
                 self.n_neuropil,
                 self.pop.varshape,
-                w_init=brainstate.init.KaimingNormal(unit=u.mV),
-                b_init=brainstate.init.ZeroInit(unit=u.mV),
+                w_init=braintools.init.KaimingNormal(unit=u.mV),
+                b_init=braintools.init.ZeroInit(unit=u.mV),
                 param_type=param_type
             ),
-            brainscale.nn.ReLU()
+            brainstate.nn.ReLU()
         )
 
     def update(self, embedding):
@@ -474,7 +578,7 @@ class NeuralActivity(brainstate.nn.Module):
         refractory = self.pop.get_refractory()
 
         # excitation
-        brainstate.nn.poisson_input(
+        brainpy.state.poisson_input(
             freq=20 * u.Hz,
             num_input=1,
             weight=noise_weight,
@@ -487,7 +591,7 @@ class NeuralActivity(brainstate.nn.Module):
         refractory = self.pop.get_refractory()
 
         # excitation
-        brainstate.nn.poisson_input(
+        brainpy.state.poisson_input(
             freq=20 * u.Hz,
             num_input=1,
             weight=noise_weight,
@@ -503,7 +607,7 @@ class NeuralActivity(brainstate.nn.Module):
     def n_time(self) -> int:
         return self.spike_rates.shape[0]
 
-    @brainstate.compile.jit(static_argnums=0)
+    @brainstate.transform.jit(static_argnums=0)
     def neuropil_fr_to_embedding(self, neuropil_fr: u.Quantity[u.Hz]):
         """
         Convert firing rates from neuropil-level to embedding-level.
@@ -593,7 +697,6 @@ class NeuralActivity(brainstate.nn.Module):
         #     spike_rates = np.minimum(spike_rates, 0.)
         # plt.imshow(spike_rates.T, aspect='auto')
         # plt.show()
-
 
         for i in range(1, self.n_time, batch_size):
             if i + batch_size > self.n_time:
@@ -727,14 +830,14 @@ class FiringRateNetwork(brainstate.nn.Module):
             spk = self.interaction.update()
             return spk
 
-    @brainstate.compile.jit(static_argnums=0)
+    @brainstate.transform.jit(static_argnums=0)
     def simulate(self, inp_embedding, indices):
         def step_run(i):
             self.update_test(i, noise_weight)
 
         noise_weight = self.neural_activity.neuropil2neuron(inp_embedding)
         self.pop.reset_spk_count()
-        brainstate.compile.for_loop(step_run, indices)
+        brainstate.transform.for_loop(step_run, indices)
         frs = self.count_neuropil_fr(indices.shape[0])
         return frs
 
@@ -782,7 +885,7 @@ class Trainer:
         The neural network model being trained.
     trainable_weights : dict
         Dictionary of trainable parameters in the model.
-    opt : brainstate.optim.Adam
+    opt : braintools.optim.Adam
         Optimizer for updating model parameters.
     filepath : str
         Path for saving training results.
@@ -808,6 +911,7 @@ class Trainer:
         seed: int = 2025,
         noise_sigma: float = 0.1,
         bin_size: u.Quantity = 0.1 * u.Hz,
+        filepath: str = None,  # Optional filepath parameter
     ):
         # parameters
         self.sim_before_train = sim_before_train
@@ -832,29 +936,34 @@ class Trainer:
 
         # optimizer
         self.trainable_weights = brainstate.graph.states(self.target, brainstate.ParamState)
-        self.opt = brainstate.optim.Adam(lr)
+        self.opt = braintools.optim.Adam(lr)
         self.opt.register_trainable_weights(self.trainable_weights)
 
         # train save path
-        time_ = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-        self.filepath = (
-            f'results/'
-            f'v4_2/'
-            f'{flywire_version}#'
-            f'{neural_activity_id}#'
-            f'{max_firing_rate / u.Hz}Hz#'
-            f'{etrace_decay}#'
-            f'{loss_fn}#'
-            f'{conn_param_type.__name__}#'
-            f'{input_param_type.__name__}#'
-            f'{scale_factor.to_decimal(u.mV):5f}#'
-            f'{n_rank}#'
-            f'{sim_before_train}#'
-            f'{seed}#'
-            f'{bin_size.to_decimal(u.Hz)}#'
-            f'{noise_sigma}#'
-            f'{time_}'
-        )
+        if filepath is None:
+            # Generate timestamp-based path (old behavior)
+            time_ = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+            self.filepath = (
+                f'results/'
+                f'v4_2/'
+                f'{flywire_version}#'
+                f'{neural_activity_id}#'
+                f'{max_firing_rate / u.Hz}Hz#'
+                f'{etrace_decay}#'
+                f'{loss_fn}#'
+                f'{conn_param_type.__name__}#'
+                f'{input_param_type.__name__}#'
+                f'{scale_factor.to_decimal(u.mV):5f}#'
+                f'{n_rank}#'
+                f'{sim_before_train}#'
+                f'{seed}#'
+                f'{bin_size.to_decimal(u.Hz)}#'
+                f'{noise_sigma}#'
+                f'{time_}'
+            )
+        else:
+            # Use provided filepath
+            self.filepath = filepath
 
     def get_loss(self, current_neuropil_fr, target_neuropil_fr):
         if self.loss_fn == 'mse':
@@ -871,7 +980,7 @@ class Trainer:
             raise ValueError(f'Unknown loss function: {self.loss_fn}')
         return loss
 
-    @brainstate.compile.jit(static_argnums=0)
+    @brainstate.transform.jit(static_argnums=0)
     def train(self, input_embed, target_neuropil_fr):
         indices = np.arange(self.target.n_sample_step)
 
@@ -886,7 +995,7 @@ class Trainer:
             model = brainscale.IODimVjpAlgorithm(self.target, self.etrace_decay, vjp_method=self.vjp_method)
         brainstate.nn.vmap_init_all_states(self.target, axis_size=n_batch, state_tag='hidden')
 
-        @brainstate.augment.vmap_new_states(
+        @brainstate.transform.vmap_new_states(
             state_tag='etrace',
             axis_size=n_batch,
             in_states=self.target.states('hidden')
@@ -901,7 +1010,7 @@ class Trainer:
         n_sim = int(self.sim_before_train * self.target.n_sample_step)
         if n_sim > 0:
             batch_target = brainstate.nn.Vmap(self.target, vmap_states='hidden', in_axes=(None, 0))
-            brainstate.compile.for_loop(
+            brainstate.transform.for_loop(
                 lambda i: batch_target(i, input_embed),
                 indices[:n_sim],
             )
@@ -909,7 +1018,7 @@ class Trainer:
         # simulation with eligibility trace recording
         self.target.pop.reset_spk_count(n_batch)
         model = brainstate.nn.Vmap(model, vmap_states=('hidden', 'etrace'), in_axes=(None, 0))
-        brainstate.compile.for_loop(
+        brainstate.transform.for_loop(
             lambda i: model(i, input_embed),
             indices[n_sim:-1],
         )
@@ -921,7 +1030,7 @@ class Trainer:
             loss_ = self.get_loss(current_neuropil_fr, target_neuropil_fr).mean()
             return u.get_mantissa(loss_), current_neuropil_fr
 
-        grads, loss, neuropil_fr = brainstate.augment.grad(
+        grads, loss, neuropil_fr = brainstate.transform.grad(
             loss_fn, self.trainable_weights, return_value=True, has_aux=True
         )(indices[-1])
         max_g = jax.tree.map(lambda x: jnp.abs(x).max(), grads)
@@ -973,7 +1082,8 @@ class Trainer:
 
         # training process
         os.makedirs(filepath, exist_ok=True)
-        with open(f'{filepath}/losses.txt', 'w') as file:
+        with open(f'{filepath}/first-round-losses.txt', 'w') as file:
+            output(file, str(settings))
 
             # training
             max_acc = 0.
@@ -1018,7 +1128,7 @@ class Trainer:
                 )
                 if acc > max_acc:
                     braintools.file.msgpack_save(
-                        f'{filepath}/best-checkpoint.msgpack',
+                        f'{filepath}/first-round-checkpoint.msgpack',
                         self.target.states(brainstate.ParamState),
                     )
                     max_acc = acc
@@ -1042,85 +1152,75 @@ def load_setting(filepath):
     return locals()
 
 
-def first_round_train():
-    checkpoint_path = None
+def run_first_round_train(args):
+    """Run the first round of training (spiking neural network)."""
+    brainstate.environ.set(dt=args.dt * u.ms)
 
-    train_epoch = 500
-    if checkpoint_path is None:
-        neural_activity_id = '2017-10-26_1'
-        flywire_version = '630'
-        lr, etrace_decay, scale_factor, bin_size, noise_sigma = 1e-2, 0.99, 0.0825 / 100 * u.mV, 0.25 * u.Hz, 0.05
-    else:
-        lr = brainstate.optim.StepLR(1e-3, step_size=50, gamma=0.9)
-        settings = checkpoint_path.split('/')[2].split('#')
-        flywire_version = settings[0]
-        neural_activity_id = settings[1]
-        etrace_decay = float(settings[3])
-        conn_param_type = settings[5]
-        input_param_type = settings[6]
-        scale_factor = float(settings[7]) * u.mV
-        n_rank = int(settings[8])
-        sim_before_train = float(settings[9])
-        bin_size = float(settings[11]) * u.Hz
-        noise_sigma = float(settings[12])
+    # Determine checkpoint path
+    checkpoint_path = os.path.join(args.filepath, 'first-round-checkpoint.msgpack')
+    checkpoint_to_load = checkpoint_path if os.path.exists(checkpoint_path) else None
 
-    brainstate.environ.set(dt=1.0 * u.ms)
+    # Determine parameter types based on etrace_decay
+    conn_param_type = brainscale.ETraceParam if args.etrace_decay != 0. else brainscale.NonTempParam
+    input_param_type = brainscale.ETraceParam if args.etrace_decay != 0. else brainscale.NonTempParam
+
+    # Create trainer
     trainer = Trainer(
-        lr=lr,
-        etrace_decay=etrace_decay,
-        sim_before_train=0.1,
-        neural_activity_id=neural_activity_id,
-        flywire_version=flywire_version,
-        max_firing_rate=100.0 * u.Hz,
-        loss_fn='mse',
-        scale_factor=scale_factor,
-        conn_param_type=brainscale.ETraceParam if etrace_decay != 0. else brainscale.NonTempParam,
-        input_param_type=brainscale.ETraceParam if etrace_decay != 0. else brainscale.NonTempParam,
-        bin_size=bin_size,
-        noise_sigma=noise_sigma,
+        lr=args.lr,
+        etrace_decay=args.etrace_decay,
+        sim_before_train=args.sim_before_train,
+        neural_activity_id=args.neural_activity_id,
+        flywire_version=args.flywire_version,
+        max_firing_rate=args.max_firing_rate * u.Hz,
+        loss_fn=args.loss_fn,
+        scale_factor=args.scale_factor * u.mV,
+        conn_param_type=conn_param_type,
+        input_param_type=input_param_type,
+        bin_size=args.bin_size * u.Hz,
+        noise_sigma=args.noise_sigma,
+        grad_clip=args.grad_clip,
+        n_rank=args.n_rank,
+        seed=args.seed,
+        filepath=args.filepath,  # Pass filepath directly
     )
+
+    # Run training
     trainer.round1_train(
-        train_epoch=train_epoch,
-        batch_size=128,
-        checkpoint_path=checkpoint_path
+        train_epoch=args.epoch_round1,
+        batch_size=args.batch_size,
+        checkpoint_path=checkpoint_to_load  # Load if exists
     )
 
+    print(f"\nFirst round training completed. Best checkpoint saved to: {checkpoint_path}")
 
-def generate_training_data():
-    brainstate.environ.set(dt=0.2 * u.ms)
 
-    filepath = 'results/v4_2/630#2017-10-26_1#100.0Hz#0.99#mse#ETraceParam#ETraceParam#0.000825#20#0.1#2025#0.25#0.05#2025-04-12-20-55-49/best-checkpoint.msgpack'
-    setting = filepath.split('/')[2].split('#')
-    flywire_version = setting[0]
-    neural_activity_id = setting[1]
-    max_firing_rate = float(setting[2].split('Hz')[0]) * u.Hz
-    etrace_decay = eval(setting[3])
-    loss_fn = setting[4]
-    conn_param_type = setting[5]
-    input_param_type = setting[6]
-    scale_factor = float(setting[7]) * u.mV
-    n_rank = int(setting[8])
-    sim_before_train = float(setting[9])
-    seed = int(setting[10])
-    bin_size = float(setting[11]) * u.Hz
-    noise_sigma = float(setting[12])
+def run_generate_training_data(args, checkpoint_path):
+    """Generate training data from the first round checkpoint."""
+    # Set environment
+    brainstate.environ.set(dt=args.dt * u.ms)
 
+    # Use args.filepath instead of deriving from checkpoint_path
+    filepath = args.filepath
+
+    # Parse settings from checkpoint path
+    with open(os.path.join(filepath, 'first-round-losses.txt'), 'r') as f:
+        setting = eval(f.readline().replace('Namespace', 'dict'))
+
+    # Create network
     net = FiringRateNetwork(
-        flywire_version=flywire_version,
-        neural_activity_id=neural_activity_id,
-        neural_activity_max_fr=max_firing_rate,
-        conn_param_type=getattr(brainscale, conn_param_type),
-        input_param_type=getattr(brainscale, input_param_type),
-        n_rank=n_rank,
-        scale_factor=scale_factor,
-        seed=seed,
-        bin_size=bin_size,
-        noise_sigma=noise_sigma,
+        flywire_version=setting['flywire_version'],
+        neural_activity_id=setting['neural_activity_id'],
+        neural_activity_max_fr=setting['max_firing_rate'] * u.Hz,
+        n_rank=setting['n_rank'],
+        scale_factor=setting['scale_factor'] * u.mV,
+        seed=setting['seed'],
+        bin_size=setting['bin_size'] * u.Hz,
+        noise_sigma=setting['noise_sigma'],
     )
-    braintools.file.msgpack_load(filepath, net.states(brainstate.ParamState))
+    braintools.file.msgpack_load(checkpoint_path, net.states(brainstate.ParamState))
     brainstate.nn.init_all_states(net)
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def one_step(i, indices):
         input_embed = net.neural_activity.spike_rates[i] / u.Hz
         output_neuropil_fr = net.neural_activity.spike_rates[i + 1]
@@ -1129,22 +1229,26 @@ def generate_training_data():
         sim = jnp.corrcoef(u.get_mantissa(output_neuropil_fr), neuropil_fr)[0, 1]
         return neuropil_fr, sim
 
-    n_sim = int(sim_before_train * net.n_sample_step)
+    n_sim = int(setting['sim_before_train'] * net.n_sample_step)
     simulated_neuropil_fr = []
     indices = np.arange(net.n_sample_step)
-    bar = tqdm(total=net.neural_activity.n_time)
+    bar = tqdm(total=net.neural_activity.n_time, desc="Generating training data")
     all_sim = []
     for i in range(0, net.neural_activity.n_time):
         neuropil_fr, sim = one_step(i, indices)
         bar.update()
-        bar.set_description(f'similarity = {sim:.5f}')
+        bar.set_description(f'Generating training data (similarity = {sim:.5f})')
         indices = indices + net.n_sample_step
         simulated_neuropil_fr.append(neuropil_fr)
         all_sim.append(sim)
     bar.close()
-    print(f'Mean similarity = {np.mean(np.mean(all_sim)):.5f}')
+    print(f'Mean similarity = {np.mean(all_sim):.5f}')
     simulated_neuropil_fr = np.asarray(simulated_neuropil_fr)  # [n_time, n_neuropil]
-    np.save(os.path.join(os.path.dirname(filepath), 'simulated_neuropil_fr'), simulated_neuropil_fr)
+
+    # Save to filepath directory
+    output_path = os.path.join(filepath, 'simulated_neuropil_fr.npy')
+    np.save(output_path, simulated_neuropil_fr)
+    print(f"Generated training data saved to: {output_path}")
 
 
 class RNNNet(brainstate.nn.Module):
@@ -1161,85 +1265,72 @@ class RNNNet(brainstate.nn.Module):
         return u.math.relu(readout) * u.Hz
 
 
-def second_round_train():
-    filepath = 'results/v4_2/630#2017-10-26_1#100.0Hz#0.99#mse#ETraceParam#ETraceParam#0.000825#20#0.1#2025#0.25#0.05#2025-04-12-20-55-49'
-    setting = filepath.split('/')[2].split('#')
-    flywire_version = setting[0]
-    neural_activity_id = setting[1]
-    max_firing_rate = float(setting[2].split('Hz')[0]) * u.Hz
-    etrace_decay = eval(setting[3])
-    # loss_fn = setting[4]
-    conn_param_type = setting[5]
-    input_param_type = setting[6]
-    scale_factor = float(setting[7]) * u.mV
-    n_rank = int(setting[8])
-    sim_before_train = float(setting[9])
-    seed = int(setting[10])
-    bin_size = float(setting[11]) * u.Hz
-    noise_sigma = float(setting[12])
-    noise_sigma = 0.1
+def run_second_round_train(args, data_path):
+    """Run the second round of training (RNN encoder/decoder)."""
+    # Use args.filepath instead of deriving from data_path
+    filepath = args.filepath
 
-    n_hidden = 256
-    batch_size = 128
-    input_style = 'v1'
-    lr = brainstate.optim.StepLR(5e-3, step_size=10, gamma=0.9)
-    lr = brainstate.optim.StepLR(1e-3, step_size=10, gamma=0.9)
+    # Parse settings from checkpoint path
+    with open(os.path.join(filepath, 'first-round-losses.txt'), 'r') as f:
+        setting = eval(f.readline().replace('Namespace', 'dict'))
 
+    # Load data
+    neural_activity_id = setting['neural_activity_id']
+    bin_size = setting['bin_size'] * u.Hz
+    max_firing_rate = setting['max_firing_rate'] * u.Hz
     data = np.load(os.path.join(base_fn, f'spike_rates/ito_{neural_activity_id}_spike_rate.npz'))
     spike_rates = u.math.asarray(data['rates'][1:] * max_firing_rate).T
     targets = spike_rates[1:]
     bins = get_bins(spike_rates, bin_size, max_firing_rate)
     true_bin_indices = neuropil_to_bin_indices(targets, bins)
-    simulated_spike_rates = np.load(os.path.join(filepath, 'simulated_neuropil_fr.npy'))
-    # scales = jnp.minimum(simulated_spike_rates * noise_sigma, 0.1)
-    scales = 0.1
-    # true_scales = spike_rates / u.Hz * noise_sigma
-    # true_scales = 0.05
+    simulated_spike_rates = np.load(data_path)
+    scales = args.noise_sigma
 
     bin_indices = neuropil_to_bin_indices(spike_rates, bins)
     low_rates = bins[bin_indices - 1]
     high_rates = bins[bin_indices]
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def generate_inputs():
-        simulation_sample_fn = jax.vmap(lambda key: brainstate.random.normal(simulated_spike_rates, scales, key=key))
         simulation_sample_fn = jax.vmap(
             lambda key: jax.random.normal(key, simulated_spike_rates.shape) * scales + simulated_spike_rates)
 
-        if input_style == 'v1':
-            # sampled_spike_rates = brainstate.random.normal(spike_rates / u.Hz, true_scales)
-            # sampled_spike_rates = jnp.minimum(sampled_spike_rates, 0.)
-            # bin_indices = jax.vmap(neuropil_to_bin_indices, in_axes=(0, None))(sampled_spike_rates * u.Hz, bins)
-            # low_rates = bins[bin_indices - 1]
-            # high_rates = bins[bin_indices]
+        if args.input_style == 'v1':
             true_sample_fn = jax.vmap(lambda key: brainstate.random.uniform(low_rates, high_rates, key=key))
-            true_sampling = true_sample_fn(brainstate.random.split_key(batch_size // 2))
+            true_sampling = true_sample_fn(brainstate.random.split_key(args.batch_size // 2))
 
-            simulation_sampling = simulation_sample_fn(brainstate.random.split_key(batch_size // 2))
+            simulation_sampling = simulation_sample_fn(brainstate.random.split_key(args.batch_size // 2))
             simulation_sampling = jnp.minimum(simulation_sampling, 0.)
 
             inputs = jnp.concatenate([true_sampling, simulation_sampling], axis=0)
             return jnp.transpose(inputs, (1, 0, 2))
 
-        elif input_style == 'v2':
-            simulation_sampling = simulation_sample_fn(brainstate.random.split_key(batch_size))
+        elif args.input_style == 'v2':
+            simulation_sampling = simulation_sample_fn(brainstate.random.split_key(args.batch_size))
             simulation_sampling = jnp.minimum(simulation_sampling, 0.)
             return jnp.transpose(simulation_sampling, (1, 0, 2))
 
         else:
-            raise ValueError(f'Unknown input style: {input_style}')
+            raise ValueError(f'Unknown input style: {args.input_style}')
 
-    net = RNNNet(n_in=spike_rates.shape[1], n_hidden=n_hidden, n_out=spike_rates.shape[1])
+    net = RNNNet(n_in=spike_rates.shape[1], n_hidden=args.n_hidden, n_out=spike_rates.shape[1])
     weights = net.states(brainstate.ParamState)
-    opt = brainstate.optim.Adam(lr=lr)
+
+    # Create learning rate scheduler
+    lr = braintools.optim.StepLR(args.lr_round2, step_size=10, gamma=0.9)
+    opt = braintools.optim.Adam(lr=lr)
     opt.register_trainable_weights(weights)
 
-    # braintools.file.msgpack_load(os.path.join(filepath, f'second-round-rnn-checkpoint-{input_style}.msgpack'), weights)
+    # Check for existing checkpoint and load if exists
+    checkpoint_path = os.path.join(filepath, f'second-round-rnn-checkpoint-{args.input_style}.msgpack')
+    if os.path.exists(checkpoint_path):
+        braintools.file.msgpack_load(checkpoint_path, weights)
+        print(f"Loaded existing checkpoint: {checkpoint_path}")
+        print("Resuming training...")
 
     def f_predict(inputs):
-        # inputs = norm(inputs)
-        brainstate.nn.vmap_init_all_states(net, axis_size=batch_size)
-        return brainstate.compile.for_loop(net, inputs)
+        brainstate.nn.vmap_init_all_states(net, axis_size=args.batch_size)
+        return brainstate.transform.for_loop(net, inputs)
 
     def verify_acc(predictions):
         pred_bin_indices = neuropil_to_bin_indices(predictions, bins)
@@ -1260,25 +1351,24 @@ def second_round_train():
         acc = jax.vmap(verify_acc)(predictions).mean()
         return mse, acc
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def f_train(inputs):
-        grads, l, acc = brainstate.augment.grad(f_loss, weights, return_value=True, has_aux=True)(inputs)
+        grads, l, acc = brainstate.transform.grad(f_loss, weights, return_value=True, has_aux=True)(inputs)
         opt.update(grads)
         return l, acc
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def f_test():
         brainstate.nn.init_all_states(net)
-        outputs = brainstate.compile.for_loop(net, simulated_spike_rates)
+        outputs = brainstate.transform.for_loop(net, simulated_spike_rates)
         mse = loss_fn(outputs[:-1])
         acc = jax.vmap(verify_acc)(outputs[:-1]).mean()
         return mse, acc
 
-    all_loss = []
-    all_acc = []
     min_loss = np.inf
     t0 = time.time()
-    for i_epoch in range(1000):
+    print(f"\nStarting second round training for {args.epoch_round2} epochs...")
+    for i_epoch in range(args.epoch_round2):
         train_loss_epoch = []
         train_acc_epoch = []
         for i_batch in range(100):
@@ -1301,150 +1391,69 @@ def second_round_train():
         opt.lr.step_epoch()
         if min_loss > test_mse:
             min_loss = test_mse
-            braintools.file.msgpack_save(f'{filepath}/second-round-rnn-checkpoint-{input_style}.msgpack',
-                                         net.states(brainstate.LongTermState))
+            braintools.file.msgpack_save(checkpoint_path, net.states(brainstate.LongTermState))
+            print(f"  -> New best model saved (test loss: {min_loss:.5f})")
         t0 = time.time()
 
-    fig, gs = braintools.visualize.get_figure(1, 2, 3, 4)
-    fig.add_subplot(gs[0, 0])
-    plt.plot(all_loss)
-    plt.xlabel('Batch')
-    plt.ylabel('Loss')
-    fig.add_subplot(gs[0, 1])
-    plt.plot(all_acc)
-    plt.xlabel('Batch')
-    plt.ylabel('Bin accuracy')
-    plt.show()
+    print(f"\nSecond round training completed. Best checkpoint saved to: {checkpoint_path}")
 
 
-def second_round_loading():
-    filepath = 'results/v4_2/630#2017-10-26_1#100.0Hz#0.99#mse#ETraceParam#ETraceParam#0.000825#20#0.1#2025#0.25#0.05#2025-04-12-20-55-49'
-    setting = filepath.split('/')[2].split('#')
-    flywire_version = setting[0]
-    neural_activity_id = setting[1]
-    max_firing_rate = float(setting[2].split('Hz')[0]) * u.Hz
-    etrace_decay = eval(setting[3])
-    # loss_fn = setting[4]
-    conn_param_type = setting[5]
-    input_param_type = setting[6]
-    scale_factor = float(setting[7]) * u.mV
-    n_rank = int(setting[8])
-    sim_before_train = float(setting[9])
-    seed = int(setting[10])
-    bin_size = float(setting[11]) * u.Hz
-    noise_sigma = float(setting[12])
-    noise_sigma = 0.1
+def run_evaluate(args, checkpoint_round1, checkpoint_round2):
+    """Run evaluation using both checkpoints."""
+    # Set environment
+    brainstate.environ.set(dt=args.dt * u.ms)
 
-    data = np.load(os.path.join(base_fn, f'spike_rates/ito_{neural_activity_id}_spike_rate.npz'))
-    spike_rates = u.math.asarray(data['rates'][1:] * max_firing_rate).T
-    simulated_spike_rates = np.load(os.path.join(filepath, 'simulated_neuropil_fr.npy'))
-    n_hidden = 256
+    # Use args.filepath instead of deriving from checkpoint_round1
+    filepath = args.filepath
 
-    net = RNNNet(n_in=spike_rates.shape[1], n_hidden=n_hidden, n_out=spike_rates.shape[1])
-    norm = brainstate.nn.LayerNorm(spike_rates.shape[1])
-    braintools.file.msgpack_load(os.path.join(filepath, f'second-round-rnn-checkpoint-v1.msgpack'),
-                                 net.states(brainstate.LongTermState))
+    # Parse settings from checkpoint path
+    with open(os.path.join(filepath, 'first-round-losses.txt'), 'r') as f:
+        setting = eval(f.readline().replace('Namespace', 'dict'))
 
-    brainstate.nn.init_all_states(net)
-    outputs = brainstate.compile.for_loop(lambda x: net(norm(x)), simulated_spike_rates)
+    flywire_version = setting['flywire_version']
+    neural_activity_id = setting['neural_activity_id']
+    max_firing_rate = setting['max_firing_rate'] * u.Hz
+    etrace_decay = setting['etrace_decay']
+    loss_fn = setting['loss_fn']
+    conn_param_type = brainscale.ETraceParam if etrace_decay != 0. else brainscale.NonTempParam
+    input_param_type = brainscale.ETraceParam if etrace_decay != 0. else brainscale.NonTempParam
+    scale_factor = setting['scale_factor'] * u.mV
+    n_rank = setting['n_rank']
+    sim_before_train = setting['sim_before_train']
+    seed = setting['seed']
+    bin_size = setting['bin_size'] * u.Hz
+    noise_sigma = setting['noise_sigma']
 
-    times = np.arange(simulated_spike_rates.shape[0]) * 0.8 * u.second
-    num = 5
-    for ii in range(0, spike_rates.shape[1], num):
-        fig, gs = braintools.visualize.get_figure(num, 2, 4, 8.0)
-        for i in range(num):
-            # plot simulated neuropil firing rate data
-            fig.add_subplot(gs[i, 0])
-            data = outputs[:, i + ii]
-            plt.plot(times, data)
-            plt.ylim(0., data.max() * 1.05)
-            # plot experimental neuropil firing rate data
-            fig.add_subplot(gs[i, 1])
-            data = simulated_spike_rates[:, i + ii]
-            plt.plot(times, data)
-            plt.ylim(0., data.max() * 1.05)
-        plt.show()
+    print("\nLoading models for evaluation...")
 
-
-def example_to_simulate():
-    import matplotlib.pyplot as plt
-    brainstate.environ.set(dt=0.2 * u.ms)
-    net = FiringRateNetwork(
-        flywire_version='630',
-        neural_activity_id='2017-10-26_1',
-        neural_activity_max_fr=100 * u.Hz,
-        conn_param_type=brainscale.NonTempParam,
-        input_param_type=brainscale.NonTempParam,
-        n_rank=20,
-        # scale_factor=0.0825 / 40 * u.mV,
-        scale_factor=0.0825 / 100 * u.mV,
-    )
-    brainstate.nn.init_all_states(net)
-
-    neuropil_fr = net.neural_activity.read_neuropil_fr(0)
-    t0 = 0.0 * u.ms
-    t1 = net.n_sample_step * brainstate.environ.get_dt()
-
-    for i in range(10):
-        neuropil_fr = net.simulate(neuropil_fr, t0, t0 + t1)
-        fig, gs = braintools.visualize.get_figure(2, 1, 3, 10.0)
-        fig.add_subplot(gs[0, 0])
-        barplot(net.neural_activity.neuropils, neuropil_fr.to_decimal(u.Hz), title='Simulated FR')
-        fig.add_subplot(gs[1, 0])
-        target_neuropil_fr = net.neural_activity.read_neuropil_fr(i + 1)
-        barplot(net.neural_activity.neuropils, target_neuropil_fr.to_decimal(u.Hz), title='True FR')
-        plt.show()
-        t0 += t1
-
-
-def example_to_load():
-    brainstate.environ.set(dt=0.2 * u.ms)
-
-    # filepath = 'results/v4_2/630#2017-10-26_1#100.0Hz#0.99#mse#ETraceParam#ETraceParam#0.000825#20#0.1#2025#0.5#0.1#2025-04-12-20-54-35'
-    filepath = 'results/v4_2/630#2017-10-26_1#100.0Hz#0.99#mse#ETraceParam#ETraceParam#0.000825#20#0.1#2025#0.25#0.05#2025-04-12-20-55-49'
-    setting = filepath.split('/')[2].split('#')
-    flywire_version = setting[0]
-    neural_activity_id = setting[1]
-    max_firing_rate = float(setting[2].split('Hz')[0]) * u.Hz
-    etrace_decay = eval(setting[3])
-    loss_fn = setting[4]
-    conn_param_type = setting[5]
-    input_param_type = setting[6]
-    scale_factor = float(setting[7]) * u.mV
-    n_rank = int(setting[8])
-    sim_before_train = float(setting[9])
-    seed = int(setting[10])
-    bin_size = float(setting[11]) * u.Hz
-    noise_sigma = float(setting[12])
-
-    # spiking neural network for spike generation
+    # Load spiking neural network
     spiking_net = FiringRateNetwork(
         flywire_version=flywire_version,
         neural_activity_id=neural_activity_id,
         neural_activity_max_fr=max_firing_rate,
-        conn_param_type=getattr(brainscale, conn_param_type),
-        input_param_type=getattr(brainscale, input_param_type),
+        conn_param_type=conn_param_type,
+        input_param_type=input_param_type,
         n_rank=n_rank,
         scale_factor=scale_factor,
         seed=seed,
         bin_size=bin_size,
         noise_sigma=noise_sigma,
     )
-    braintools.file.msgpack_load(os.path.join(filepath, 'best-checkpoint.msgpack'),
-                                 spiking_net.states(brainstate.ParamState))
+    braintools.file.msgpack_load(checkpoint_round1, spiking_net.states(brainstate.ParamState))
     brainstate.nn.init_all_states(spiking_net)
+    print(f"Loaded spiking network from: {checkpoint_round1}")
 
-    # Recurrent neural network for decoding
+    # Load RNN
     rnn_net = RNNNet(
         n_in=spiking_net.neural_activity.n_neuropil,
-        n_hidden=256,
+        n_hidden=args.n_hidden,
         n_out=spiking_net.neural_activity.n_neuropil
     )
-    braintools.file.msgpack_load(os.path.join(filepath, f'second-round-rnn-checkpoint-v1.msgpack'),
-                                 rnn_net.states(brainstate.LongTermState))
+    braintools.file.msgpack_load(checkpoint_round2, rnn_net.states(brainstate.LongTermState))
     brainstate.nn.init_all_states(rnn_net)
+    print(f"Loaded RNN from: {checkpoint_round2}")
 
-    @brainstate.compile.jit
+    @brainstate.transform.jit
     def process(neuropil_firing_rate, indices):
         rnn_out = rnn_net(neuropil_firing_rate)
         spiking_net.simulate(rnn_out / u.Hz, indices[:n_sim])
@@ -1456,56 +1465,309 @@ def example_to_load():
         mse = u.get_mantissa(u.math.square(target_neuropil_fr - neuropil_fr)).mean()
         return neuropil_fr, mse, acc
 
-    # n_time = 200
+    # Run evaluation
     n_time = spiking_net.neural_activity.n_time
     n_sim = int(sim_before_train * spiking_net.n_sample_step)
-    t1 = spiking_net.n_sample_step * brainstate.environ.get_dt()
     indices = np.arange(spiking_net.n_sample_step)
-    bar = tqdm(total=n_time)
+    bar = tqdm(total=n_time, desc="Evaluating")
     all_accs = []
     all_losses = []
     simulated_neuropil_fr = []
+
+    print(f"\nRunning evaluation on {n_time} time steps...")
     for i in range(n_time):
-        # brainstate.nn.reset_all_states(net)
         if i < 100:
             neuropil_fr = spiking_net.neural_activity.read_neuropil_fr(i)
         neuropil_fr, mse, acc = process(neuropil_fr, indices)
         simulated_neuropil_fr.append(neuropil_fr.to_decimal(u.Hz))
-        bar.set_description(f'Bin acc = {acc}, mse = {mse}')
+        bar.set_description(f'Evaluating (Bin acc = {acc:.4f}, MSE = {mse:.4f})')
         bar.update(1)
         all_losses.append(float(mse))
         all_accs.append(float(acc))
         indices += spiking_net.n_sample_step
-    simulated_neuropil_fr = np.asarray(simulated_neuropil_fr)  # [n_time, n_neuropil]
-    print(
-        f'Mean bin acc  = {np.mean(all_accs):.5f}, '
-        f'mean mse loss = {np.mean(all_losses):.5f}'
-    )
-    np.save(os.path.join(filepath, 'neuropil_fr_predictions'), simulated_neuropil_fr)
+    bar.close()
 
-    experimental_neuropil_fr = np.asarray(spiking_net.neural_activity.spike_rates / u.Hz)  # [n_time, n_neuropil]
-    times = np.arange(simulated_neuropil_fr.shape[0]) * t1
-    num = 5
-    for ii in range(0, spiking_net.neural_activity.n_neuropil, num):
-        fig, gs = braintools.visualize.get_figure(num, 2, 4, 8.0)
-        for i in range(num):
-            # plot simulated neuropil firing rate data
-            fig.add_subplot(gs[i, 0])
-            data = simulated_neuropil_fr[:, i + ii]
-            plt.plot(times, data)
-            plt.ylim(0., data.max() * 1.05)
-            # plot experimental neuropil firing rate data
-            fig.add_subplot(gs[i, 1])
-            data = experimental_neuropil_fr[:n_time, i + ii]
-            plt.plot(times, data)
-            plt.ylim(0., data.max() * 1.05)
-        plt.show()
+    simulated_neuropil_fr = np.asarray(simulated_neuropil_fr)  # [n_time, n_neuropil]
+
+    # Create visualization directory
+    viz_dir = os.path.join(filepath, 'evaluation_plots')
+    os.makedirs(viz_dir, exist_ok=True)
+    print(f"\nGenerating evaluation visualizations...")
+
+    # Get ground truth data
+    ground_truth_fr = u.get_mantissa(spiking_net.neural_activity.spike_rates)  # [n_time, n_neuropil]
+    neuropil_names = spiking_net.neural_activity.neuropils
+
+    # 1. Heatmap Comparison: Ground Truth vs Simulated
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    im1 = axes[0].imshow(ground_truth_fr.T, aspect='auto', cmap='viridis', interpolation='nearest')
+    axes[0].set_xlabel('Time Step')
+    axes[0].set_ylabel('Neuropil Index')
+    axes[0].set_title('Ground Truth Neuropil Firing Rates (Hz)')
+    plt.colorbar(im1, ax=axes[0], label='Firing Rate (Hz)')
+
+    im2 = axes[1].imshow(simulated_neuropil_fr.T, aspect='auto', cmap='viridis', interpolation='nearest')
+    axes[1].set_xlabel('Time Step')
+    axes[1].set_ylabel('Neuropil Index')
+    axes[1].set_title('Simulated Neuropil Firing Rates (Hz)')
+    plt.colorbar(im2, ax=axes[1], label='Firing Rate (Hz)')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(viz_dir, 'heatmap_comparison.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # 2. Time Series: Selected neuropils
+    n_neuropils_to_plot = min(6, len(neuropil_names))
+    fig, axes = plt.subplots(n_neuropils_to_plot, 1, figsize=(12, 3 * n_neuropils_to_plot))
+    if n_neuropils_to_plot == 1:
+        axes = [axes]
+
+    # Select neuropils with highest variance for interesting plots
+    variances = np.var(ground_truth_fr, axis=0)
+    top_indices = np.argsort(variances)[-n_neuropils_to_plot:]
+
+    for idx, neuropil_idx in enumerate(top_indices):
+        axes[idx].plot(ground_truth_fr[:, neuropil_idx], label='Ground Truth', linewidth=2, alpha=0.7)
+        axes[idx].plot(simulated_neuropil_fr[:, neuropil_idx], label='Simulated', linewidth=2, alpha=0.7)
+        axes[idx].set_xlabel('Time Step')
+        axes[idx].set_ylabel('Firing Rate (Hz)')
+        axes[idx].set_title(f'Neuropil: {neuropil_names[neuropil_idx]}')
+        axes[idx].legend()
+        axes[idx].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(viz_dir, 'time_series_comparison.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # 3. Correlation Scatter Plot
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+
+    # Flatten arrays for scatter plot
+    gt_flat = ground_truth_fr.flatten()
+    sim_flat = simulated_neuropil_fr.flatten()
+
+    # Compute correlation
+    correlation = np.corrcoef(gt_flat, sim_flat)[0, 1]
+
+    # Create scatter plot with alpha for density visualization
+    ax.scatter(gt_flat, sim_flat, alpha=0.1, s=1, color='blue')
+
+    # Add diagonal line (perfect prediction)
+    max_val = max(gt_flat.max(), sim_flat.max())
+    ax.plot([0, max_val], [0, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+
+    ax.set_xlabel('Ground Truth Firing Rate (Hz)', fontsize=12)
+    ax.set_ylabel('Simulated Firing Rate (Hz)', fontsize=12)
+    ax.set_title(f'Predicted vs Actual Firing Rates\nCorrelation: {correlation:.4f}', fontsize=14)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(viz_dir, 'correlation_scatter.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # 4. Sample Bar Plots: Compare specific time points
+    sample_times = [n_time // 4, n_time // 2, 3 * n_time // 4]  # 25%, 50%, 75% through recording
+
+    for sample_idx, t in enumerate(sample_times):
+        if t >= n_time:
+            continue
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+        # Ground truth
+        axes[0].bar(range(len(neuropil_names)), ground_truth_fr[t])
+        axes[0].set_xticks(range(len(neuropil_names)))
+        axes[0].set_xticklabels(neuropil_names, rotation=90, fontsize=8)
+        axes[0].set_xlabel('Neuropil')
+        axes[0].set_ylabel('Firing Rate (Hz)')
+        axes[0].set_title(f'Ground Truth at Time Step {t}')
+
+        # Simulated
+        axes[1].bar(range(len(neuropil_names)), simulated_neuropil_fr[t])
+        axes[1].set_xticks(range(len(neuropil_names)))
+        axes[1].set_xticklabels(neuropil_names, rotation=90, fontsize=8)
+        axes[1].set_xlabel('Neuropil')
+        axes[1].set_ylabel('Firing Rate (Hz)')
+        axes[1].set_title(f'Simulated at Time Step {t}')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(viz_dir, f'barplot_comparison_t{t}.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+
+    # 5. Error Distribution Plot
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+    # Absolute error heatmap
+    abs_error = np.abs(ground_truth_fr - simulated_neuropil_fr)
+    im = axes[0, 0].imshow(abs_error.T, aspect='auto', cmap='hot', interpolation='nearest')
+    axes[0, 0].set_xlabel('Time Step')
+    axes[0, 0].set_ylabel('Neuropil Index')
+    axes[0, 0].set_title('Absolute Error |GT - Simulated| (Hz)')
+    plt.colorbar(im, ax=axes[0, 0], label='Error (Hz)')
+
+    # Relative error distribution
+    relative_error = abs_error / (ground_truth_fr + 1e-8)  # Add small epsilon to avoid division by zero
+    axes[0, 1].hist(relative_error.flatten(), bins=50, edgecolor='black')
+    axes[0, 1].set_xlabel('Relative Error')
+    axes[0, 1].set_ylabel('Count')
+    axes[0, 1].set_title('Distribution of Relative Errors')
+    axes[0, 1].set_yscale('log')
+
+    # Mean error per neuropil
+    mean_error_per_neuropil = np.mean(abs_error, axis=0)
+    axes[1, 0].bar(range(len(neuropil_names)), mean_error_per_neuropil)
+    axes[1, 0].set_xticks(range(len(neuropil_names)))
+    axes[1, 0].set_xticklabels(neuropil_names, rotation=90, fontsize=8)
+    axes[1, 0].set_xlabel('Neuropil')
+    axes[1, 0].set_ylabel('Mean Absolute Error (Hz)')
+    axes[1, 0].set_title('Mean Error Per Neuropil')
+
+    # Mean error over time
+    mean_error_per_time = np.mean(abs_error, axis=1)
+    axes[1, 1].plot(mean_error_per_time, linewidth=2)
+    axes[1, 1].set_xlabel('Time Step')
+    axes[1, 1].set_ylabel('Mean Absolute Error (Hz)')
+    axes[1, 1].set_title('Mean Error Over Time')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(viz_dir, 'error_analysis.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"Visualizations saved to: {viz_dir}")
+    print(f"  - heatmap_comparison.png")
+    print(f"  - time_series_comparison.png")
+    print(f"  - correlation_scatter.png")
+    print(f"  - barplot_comparison_t*.png (3 files)")
+    print(f"  - error_analysis.png")
+
+    # Print summary
+    print("\n" + "=" * 50)
+    print("EVALUATION RESULTS")
+    print("=" * 50)
+    print(f'Mean bin accuracy:  {np.mean(all_accs):.5f}')
+    print(f'Mean MSE loss:      {np.mean(all_losses):.5f}')
+    print("=" * 50)
+
+    # Save results
+    output_path = os.path.join(filepath, 'neuropil_fr_predictions.npy')
+    np.save(output_path, simulated_neuropil_fr)
+    print(f"\nPredictions saved to: {output_path}")
+
+    # Save summary statistics
+    stats_path = os.path.join(filepath, 'evaluation_stats.txt')
+    with open(stats_path, 'w') as f:
+        f.write(f"Mean bin accuracy: {np.mean(all_accs):.5f}\n")
+        f.write(f"Mean MSE loss: {np.mean(all_losses):.5f}\n")
+        f.write(f"Std bin accuracy: {np.std(all_accs):.5f}\n")
+        f.write(f"Std MSE loss: {np.std(all_losses):.5f}\n")
+    print(f"Statistics saved to: {stats_path}")
+
+    return np.mean(all_accs), np.mean(all_losses)
+
+
+def run_workflow(args):
+    """Orchestrate the complete training and evaluation workflow."""
+    print("\n" + "=" * 70)
+    print(" " * 15 + "DROSOPHILA WHOLE BRAIN FITTING WORKFLOW")
+    print("=" * 70)
+    print(f"Mode: {args.mode}")
+    print(f"Filepath: {args.filepath}")
+    print(f"FlyWire version: {args.flywire_version}")
+    print(f"Neural activity ID: {args.neural_activity_id}")
+    print(f"Device(s): {args.devices}")
+    print("=" * 70 + "\n")
+
+    # Ensure filepath directory exists
+    os.makedirs(args.filepath, exist_ok=True)
+
+    # Define checkpoint paths based on filepath
+    checkpoint_round1 = os.path.join(args.filepath, 'first-round-checkpoint.msgpack')
+    checkpoint_round2 = os.path.join(args.filepath, f'second-round-rnn-checkpoint-{args.input_style}.msgpack')
+    data_path = os.path.join(args.filepath, 'simulated_neuropil_fr.npy')
+
+    # Stage 1: First Round Training
+    if args.mode in ['all', 'train1']:
+        print("\n" + "=" * 70)
+        print("STAGE 1: First Round Training (Spiking Neural Network)")
+        print("=" * 70)
+
+        # Check if checkpoint exists
+        if os.path.exists(checkpoint_round1):
+            print(f"Found existing checkpoint: {checkpoint_round1}")
+            print("Loading checkpoint and resuming training...")
+            # Will load checkpoint inside run_first_round_train
+        else:
+            print("No existing checkpoint found. Starting from scratch...")
+            run_first_round_train(args)
+
+    # Stage 2: Generate Training Data (eval1)
+    if args.mode in ['all', 'eval1']:
+        print("\n" + "=" * 70)
+        print("STAGE 2: Generate Training Data (eval1)")
+        print("=" * 70)
+
+        # Check if data already exists
+        if os.path.exists(data_path):
+            print(f"Found existing training data: {data_path}")
+            print("Skipping data generation...")
+        else:
+            if not os.path.exists(checkpoint_round1):
+                raise ValueError(
+                    f"Checkpoint not found: {checkpoint_round1}\n"
+                    "Run with --mode train1 first or --mode all"
+                )
+            print("Generating training data...")
+            run_generate_training_data(args, checkpoint_round1)
+
+    # Stage 3: Second Round Training
+    if args.mode in ['all', 'train2']:
+        print("\n" + "=" * 70)
+        print("STAGE 3: Second Round Training (RNN Encoder/Decoder)")
+        print("=" * 70)
+
+        # Check if checkpoint exists
+        if os.path.exists(checkpoint_round2):
+            print(f"Found existing checkpoint: {checkpoint_round2}")
+            print("Loading checkpoint and resuming training...")
+            # Will load checkpoint inside run_second_round_train
+        else:
+            print("No existing checkpoint found. Starting from scratch...")
+            run_second_round_train(args, data_path)
+
+        # Ensure training data exists
+        if not os.path.exists(data_path):
+            raise ValueError(
+                f"Training data not found: {data_path}\n"
+                "Run with --mode eval1 first or --mode all"
+            )
+
+    # Stage 4: Evaluation
+    if args.mode in ['all', 'evaluate']:
+        print("\n" + "=" * 70)
+        print("STAGE 4: Evaluation")
+        print("=" * 70)
+
+        # Check both checkpoints exist
+        if not os.path.exists(checkpoint_round1):
+            raise ValueError(
+                f"Round 1 checkpoint not found: {checkpoint_round1}\n"
+                "Run with --mode train1 first or --mode all"
+            )
+        if not os.path.exists(checkpoint_round2):
+            raise ValueError(
+                f"Round 2 checkpoint not found: {checkpoint_round2}\n"
+                "Run with --mode train2 first or --mode all"
+            )
+        run_evaluate(args, checkpoint_round1, checkpoint_round2)
+
+    print("\n" + "=" * 70)
+    print(" " * 20 + "WORKFLOW COMPLETED SUCCESSFULLY!")
+    print("=" * 70 + "\n")
 
 
 if __name__ == '__main__':
-    first_round_train()
-    # generate_training_data()
-    # second_round_train()
-    # second_round_loading()
-    # example_to_load()
-    # example_to_simulate()
+    run_workflow(settings)

@@ -39,7 +39,7 @@ Please download the datasets (https://drive.google.com/file/d/1TPuHJ-IC1yQtL5TMn
 Run the training and prediction pipeline:
 
 ```bash
-python drosophila_whole_brain_fitting.py --flywire_version 630 --neural_activity_id 2017-10-30_1 --bin_size 0.5 --devices 0 --split 0.6 --epoch_round1 50 --epoch_round2 50
+python drosophila_whole_brain_fitting.py --flywire_version 630 --neural_activity_id 2017-10-30_1 --devices 0 --split 0.6 --epoch_round1 50 --epoch_round2 50
 ```
 
 ### Command Line Arguments

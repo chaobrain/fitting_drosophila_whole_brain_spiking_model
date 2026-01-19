@@ -219,7 +219,7 @@ All visualizations are publication-ready (150 DPI, proper labels and legends).
 
 If you use this code or data, please cite:
 
-```text
+```bibtex
 
 @Article{Wang2026,
   author={Wang, Chaoming
